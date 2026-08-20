@@ -1,0 +1,37 @@
+# Visual Studio and CMake build output
+/.vs/
+/out/
+/x64/
+/deploy/
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+
+# Compiled binaries and packages
+*.obj
+*.o
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+*.exe
+*.zip
+*.7z
+*.AppImage
+*.dmg
+/installer/windows/Output/
+
+# Editor and operating-system metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+

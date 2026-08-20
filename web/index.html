@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>MdViewer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="titlebar">
+      <div class="app-brand" aria-label="MdViewer">
+        <span class="app-mark" aria-hidden="true">M</span>
+        <span class="app-name">MdViewer</span>
+      </div>
+
+      <nav class="main-menu" aria-label="Main menu" data-i18n-aria-label="Main menu">
+        <div class="menu-root">
+          <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false"
+                  data-menu-title data-i18n="&amp;File">File</button>
+          <div class="menu-popup" role="menu" hidden>
+            <button type="button" role="menuitem" data-menu-command="file.new" data-i18n="&amp;New	Ctrl+N">&amp;New</button>
+            <button type="button" role="menuitem" data-menu-command="file.open" data-i18n="&amp;Open...	Ctrl+O">&amp;Open...</button>
+            <div class="menu-separator" role="separator"></div>
+            <button type="button" role="menuitem" data-menu-command="file.save" data-i18n="&amp;Save	Ctrl+S">&amp;Save</button>
+            <button type="button" role="menuitem" data-menu-command="file.saveAs" data-i18n="Save &amp;As...	Ctrl+Shift+S">Save &amp;As...</button>
+            <div class="menu-separator" role="separator"></div>
+            <button type="button" role="menuitem" data-menu-command="app.exit" data-i18n="E&amp;xit">E&amp;xit</button>
+          </div>
+        </div>
+
+        <div class="menu-root">
+          <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false"
+                  data-menu-title data-i18n="&amp;Edit">Edit</button>
+          <div class="menu-popup" role="menu" hidden>
+            <button type="button" role="menuitem" data-menu-command="edit.undo" data-i18n="&amp;Undo	Ctrl+Z">&amp;Undo</button>
+            <button type="button" role="menuitem" data-menu-command="edit.redo" data-i18n="&amp;Redo	Ctrl+Y">&amp;Redo</button>
+            <div class="menu-separator" role="separator"></div>
+            <button type="button" role="menuitem" data-menu-command="edit.cut" data-i18n="Cu&amp;t	Ctrl+X">Cu&amp;t</button>
+            <button type="button" role="menuitem" data-menu-command="edit.copy" data-i18n="&amp;Copy	Ctrl+C">&amp;Copy</button>
+            <button type="button" role="menuitem" data-menu-command="edit.paste" data-i18n="&amp;Paste	Ctrl+V">&amp;Paste</button>
+            <button type="button" role="menuitem" data-menu-command="edit.selectAll" data-i18n="Select &amp;All	Ctrl+A">Select &amp;All</button>
+            <div class="menu-separator" role="separator"></div>
+            <button type="button" role="menuitem" data-menu-command="edit.find" data-i18n="&amp;Find...	Ctrl+F">&amp;Find...</button>
+          </div>
+        </div>
+
+        <div class="menu-root">
+          <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false"
+                  data-menu-title data-i18n="&amp;View">View</button>
+          <div class="menu-popup" role="menu" hidden>
+            <button type="button" role="menuitemradio" data-menu-command="view.source" data-mode-menu="source"
+                    aria-checked="true" data-i18n="&amp;Source editing">&amp;Source editing</button>
+            <button type="button" role="menuitemradio" data-menu-command="view.preview" data-mode-menu="preview"
+                    aria-checked="false" data-i18n="&amp;Preview editing">&amp;Preview editing</button>
+            <div class="menu-separator" role="separator"></div>
+            <div class="menu-submenu">
+              <button type="button" class="submenu-trigger" role="menuitem" aria-haspopup="true">
+                <span data-i18n="&amp;Theme">&amp;Theme</span><span aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup submenu-popup" role="menu">
+                <button type="button" role="menuitemradio" data-menu-command="theme.light" data-theme-menu="light"
+                        aria-checked="false" data-i18n="&amp;Light theme">&amp;Light theme</button>
+                <button type="button" role="menuitemradio" data-menu-command="theme.dark" data-theme-menu="dark"
+                        aria-checked="true" data-i18n="&amp;Dark theme">&amp;Dark theme</button>
+              </div>
+            </div>
+            <div class="menu-submenu">
+              <button type="button" class="submenu-trigger" role="menuitem" aria-haspopup="true">
+                <span data-i18n="&amp;Language">&amp;Language</span><span aria-hidden="true">›</span>
+              </button>
+              <div id="language-menu" class="menu-popup submenu-popup language-menu" role="menu"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="menu-root">
+          <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false"
+                  data-menu-title data-i18n="&amp;Help">Help</button>
+          <div class="menu-popup" role="menu" hidden>
+            <button type="button" role="menuitem" data-menu-command="app.about"
+                    data-i18n="&amp;About MdViewer">&amp;About MdViewer</button>
+          </div>
+        </div>
+      </nav>
+
+      <div id="titlebar-drag-region" class="titlebar-drag-region">
+        <div class="document-identity" aria-live="polite">
+          <strong id="document-name">Untitled</strong>
+          <span id="dirty-indicator" class="dirty-indicator" hidden>●</span>
+        </div>
+      </div>
+
+      <div class="window-controls" aria-label="Window controls" data-i18n-aria-label="Window controls">
+        <button type="button" data-window-command="window.minimize" title="Minimize" aria-label="Minimize"
+                data-i18n-title="Minimize" data-i18n-aria-label="Minimize">─</button>
+        <button id="maximize-button" type="button" data-window-command="window.maximizeToggle"
+                title="Maximize" aria-label="Maximize"
+                data-i18n-title="Maximize" data-i18n-aria-label="Maximize">□</button>
+        <button class="close-button" type="button" data-window-command="window.close"
+                title="Close" aria-label="Close"
+                data-i18n-title="Close" data-i18n-aria-label="Close">×</button>
+      </div>
+    </header>
+
+    <header class="toolbar">
+      <div class="mode-switch" role="group" aria-label="Editor mode"
+           data-i18n-aria-label="Editor mode">
+        <button id="source-mode-button" type="button" aria-pressed="true">
+          <span aria-hidden="true">&lt;/&gt;</span><span data-i18n="Source">Source</span>
+        </button>
+        <button id="preview-mode-button" type="button" aria-pressed="false">
+          <span aria-hidden="true">◫</span><span data-i18n="Preview">Preview</span>
+        </button>
+      </div>
+
+      <div class="format-actions" role="group" aria-label="Formatting"
+           data-i18n-aria-label="Formatting">
+        <button type="button" data-format="bold" data-i18n-title="Bold" title="Bold"><strong>B</strong></button>
+        <button type="button" data-format="italic" data-i18n-title="Italic" title="Italic"><em>I</em></button>
+        <button type="button" data-format="heading" data-i18n-title="Heading" title="Heading">H</button>
+        <button type="button" data-format="code" data-i18n-title="Code" title="Code">{ }</button>
+        <button type="button" data-format="link" data-i18n-title="Link" title="Link">↗</button>
+      </div>
+
+      <button id="theme-button" class="theme-button" type="button"
+              title="Change theme" aria-label="Change theme"
+              data-i18n-title="Change theme" data-i18n-aria-label="Change theme">◐</button>
+
+      <label class="language-control">
+        <span class="visually-hidden" data-i18n="Language">Language</span>
+        <select id="language-select" aria-label="Language" data-i18n-aria-label="Language"></select>
+      </label>
+    </header>
+
+    <main class="editor-stage">
+      <section id="source-pane" class="editor-pane" aria-label="Markdown source"
+               data-i18n-aria-label="Markdown source">
+        <textarea id="source-editor" spellcheck="false"
+                  placeholder="Write Markdown source here…"
+                  data-i18n-placeholder="Write Markdown source here…"></textarea>
+      </section>
+      <section id="preview-pane" class="editor-pane" aria-label="Rendered preview"
+               data-i18n-aria-label="Rendered preview" hidden>
+        <article id="preview-editor" class="markdown-body" contenteditable="true"
+                 spellcheck="true" aria-label="Edit the rendered document directly…"
+                 data-i18n-aria-label="Edit the rendered document directly…"></article>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span id="mode-status" data-i18n="Source editing">Source editing</span>
+      <span class="status-separator" aria-hidden="true"></span>
+      <span id="position-status">Line 1, Column 1</span>
+      <span class="status-spacer"></span>
+      <span id="encoding-status">UTF-8</span>
+      <span id="eol-status">CRLF</span>
+      <span id="save-status" data-i18n="Ready">Ready</span>
+    </footer>
+  </div>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

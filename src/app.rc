@@ -1,0 +1,54 @@
+#include <windows.h>
+#include "resource.h"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+IDI_APP_ICON ICON "../assets/MdViewer.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,2,0,0
+ PRODUCTVERSION 0,2,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "MdViewer\0"
+            VALUE "FileDescription", "MdViewer Markdown Editor\0"
+            VALUE "FileVersion", "0.2.0\0"
+            VALUE "InternalName", "MdViewer\0"
+            VALUE "OriginalFilename", "MdViewer.exe\0"
+            VALUE "ProductName", "MdViewer\0"
+            VALUE "ProductVersion", "0.2.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+IDR_UI_INDEX RCDATA "../web/index.html"
+IDR_UI_STYLES RCDATA "../web/styles.css"
+IDR_UI_I18N RCDATA "../web/i18n.js"
+IDR_UI_SCRIPT RCDATA "../web/app.js"
+
+IDR_LOCALE_KO_KR RCDATA "../web/locales/ko-KR.json"
+IDR_LOCALE_JA_JP RCDATA "../web/locales/ja-JP.json"
+IDR_LOCALE_FR_FR RCDATA "../web/locales/fr-FR.json"
+IDR_LOCALE_DE_DE RCDATA "../web/locales/de-DE.json"
+IDR_LOCALE_ZH_CN RCDATA "../web/locales/zh-CN.json"
+IDR_LOCALE_ZH_TW RCDATA "../web/locales/zh-TW.json"
+IDR_LOCALE_ES_ES RCDATA "../web/locales/es-ES.json"
+IDR_LOCALE_PT_BR RCDATA "../web/locales/pt-BR.json"
+IDR_LOCALE_HI_IN RCDATA "../web/locales/hi-IN.json"
+IDR_LOCALE_ID_ID RCDATA "../web/locales/id-ID.json"
+IDR_LOCALE_RU_RU RCDATA "../web/locales/ru-RU.json"

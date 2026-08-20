@@ -1,0 +1,20 @@
+#pragma once
+
+#define IDI_APP_ICON 10
+
+#define IDR_UI_INDEX 101
+#define IDR_UI_STYLES 102
+#define IDR_UI_I18N 103
+#define IDR_UI_SCRIPT 104
+
+#define IDR_LOCALE_KO_KR 201
+#define IDR_LOCALE_JA_JP 202
+#define IDR_LOCALE_FR_FR 203
+#define IDR_LOCALE_DE_DE 204
+#define IDR_LOCALE_ZH_CN 205
+#define IDR_LOCALE_ZH_TW 206
+#define IDR_LOCALE_ES_ES 207
+#define IDR_LOCALE_PT_BR 208
+#define IDR_LOCALE_HI_IN 209
+#define IDR_LOCALE_ID_ID 210
+#define IDR_LOCALE_RU_RU 211

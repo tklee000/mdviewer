@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MdViewer
+Comment=View and edit Markdown files
+Comment[ko]=Markdown 파일 보기 및 편집
+Exec=mdviewer %F
+Icon=mdviewer
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=true

@@ -53,6 +53,8 @@
       let text = t(element.dataset.i18n);
       if (element.hasAttribute("data-menu-title")) {
         text = text.replace(/\(&[A-Za-z]\)/g, "").replace(/&(?=\p{L})/u, "");
+      } else if (element.closest('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]')) {
+        text = text.replace(/\(&[A-Za-z]\)/g, "").replace(/&(?=\p{L})/u, "");
       }
       element.textContent = text;
     });

@@ -5,6 +5,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_context_menu_handler.h"
+#include "include/cef_drag_handler.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
@@ -25,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -125,6 +127,7 @@ class BrowserClient final : public CefClient,
                             public CefLifeSpanHandler,
                             public CefLoadHandler,
                             public CefContextMenuHandler,
+                            public CefDragHandler,
                             public CefKeyboardHandler,
                             public CefRequestHandler {
 public:
@@ -133,6 +136,7 @@ public:
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
     CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+    CefRefPtr<CefDragHandler> GetDragHandler() override { return this; }
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
@@ -197,6 +201,27 @@ public:
         if (model) model->Clear();
     }
 
+    bool OnDragEnter(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefDragData> dragData,
+                     DragOperationsMask mask) override {
+        std::vector<std::wstring> paths;
+        if (dragData && dragData->IsFile()) {
+            std::vector<CefString> cefPaths;
+            if (dragData->GetFilePaths(cefPaths)) {
+                paths.reserve(cefPaths.size());
+                for (const auto& path : cefPaths) {
+                    if (!path.empty()) paths.push_back(path.ToWString());
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pendingDropPaths_ = std::move(paths);
+            pendingDropTime_ = std::chrono::steady_clock::now();
+        }
+        return false;
+    }
+
     bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                        const CefKeyEvent& event,
                        CefEventHandle osEvent,
@@ -238,9 +263,27 @@ public:
             !frame->IsMain() || !IsApplicationUrl(frame->GetURL().ToString())) {
             return false;
         }
+        const std::string messageJson =
+            message->GetArgumentList()->GetString(0).ToString();
+        if (messageJson.find("\"type\":\"files.dropped\"") != std::string::npos) {
+            std::vector<std::wstring> paths;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (std::chrono::steady_clock::now() - pendingDropTime_ <=
+                    std::chrono::seconds(10)) {
+                    paths = std::move(pendingDropPaths_);
+                }
+                pendingDropPaths_.clear();
+            }
+            if (!paths.empty()) {
+                if (auto* delegate = delegate_.load()) {
+                    delegate->OnFilesDropped(paths);
+                }
+            }
+            return true;
+        }
         if (auto* delegate = delegate_.load()) {
-            delegate->OnBrowserMessage(
-                message->GetArgumentList()->GetString(0).ToString());
+            delegate->OnBrowserMessage(messageJson);
         }
         return true;
     }
@@ -316,6 +359,8 @@ private:
     std::condition_variable closedCondition_;
     CefRefPtr<CefBrowser> browser_;
     HWND browserWindow_ = nullptr;
+    std::vector<std::wstring> pendingDropPaths_;
+    std::chrono::steady_clock::time_point pendingDropTime_{};
     bool creationPending_ = false;
     bool closeRequested_ = false;
     bool closed_ = false;
@@ -349,7 +394,7 @@ public:
         windowInfo.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 
         CefBrowserSettings settings;
-        settings.background_color = CefColorSetARGB(255, 10, 13, 18);
+        settings.background_color = CefColorSetARGB(255, 18, 18, 18);
         client_->BeginBrowserCreation();
         const bool created = CefBrowserHost::CreateBrowser(
             windowInfo, client_, initialUrl, settings, nullptr, nullptr);

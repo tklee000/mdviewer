@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 class UiResourceProvider;
 
@@ -10,6 +11,7 @@ public:
     virtual ~BrowserHostDelegate() = default;
     virtual void OnBrowserCreated() = 0;
     virtual void OnBrowserMessage(const std::string& message) = 0;
+    virtual void OnFilesDropped(const std::vector<std::wstring>& paths) = 0;
     virtual void OnBrowserLoadError(const std::wstring& message) = 0;
 };
 

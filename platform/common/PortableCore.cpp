@@ -284,9 +284,23 @@ void EditorController::OnWebMessage(const std::string& message) {
         return;
     }
     if (*type == "document.changed") {
+        bool changed = false;
         if (const auto text = JsonString(message, "text")) {
-            text_ = *text;
-            dirty_ = true;
+            if (*text != text_) {
+                text_ = *text;
+                changed = true;
+            }
+        }
+        if (const auto eol = JsonString(message, "eol")) {
+            const bool crlf = *eol == "CRLF";
+            if ((*eol == "LF" || *eol == "CRLF") && crlf != usedCrLf_) {
+                usedCrLf_ = crlf;
+                changed = true;
+            }
+        }
+        const auto reportedDirty = JsonBool(message, "dirty");
+        if (reportedDirty || changed) {
+            dirty_ = reportedDirty.value_or(true);
             UpdateTitle();
         }
         return;
@@ -374,6 +388,7 @@ bool EditorController::OpenDocument(const std::filesystem::path& path) {
     hadBom_ = hadBom;
     usedCrLf_ = usedCrLf;
     dirty_ = false;
+    editorMode_ = "preview";
     resources_->SetDocumentDirectory(path_.parent_path());
     UpdateTitle();
     if (ready_) SendDocumentState("document.opened");
@@ -408,6 +423,7 @@ void EditorController::NewDocument() {
     dirty_ = false;
     hadBom_ = false;
     usedCrLf_ = false;
+    editorMode_ = "preview";
     resources_->SetDocumentDirectory({});
     UpdateTitle();
     if (ready_) SendDocumentState("document.opened");
@@ -521,6 +537,19 @@ std::optional<std::string> JsonString(const std::string& json, const std::string
             default: return std::nullopt;
         }
     }
+    return std::nullopt;
+}
+
+std::optional<bool> JsonBool(const std::string& json, const std::string& key) {
+    const std::string token = "\"" + key + "\"";
+    std::size_t cursor = json.find(token);
+    if (cursor == std::string::npos) return std::nullopt;
+    cursor = json.find(':', cursor + token.size());
+    if (cursor == std::string::npos) return std::nullopt;
+    cursor = json.find_first_not_of(" \t\r\n", cursor + 1);
+    if (cursor == std::string::npos) return std::nullopt;
+    if (json.compare(cursor, 4, "true") == 0) return true;
+    if (json.compare(cursor, 5, "false") == 0) return false;
     return std::nullopt;
 }
 

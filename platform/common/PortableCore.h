@@ -83,7 +83,7 @@ private:
     std::string text_;
     std::string language_;
     std::string theme_;
-    std::string editorMode_ = "source";
+    std::string editorMode_ = "preview";
     bool dirty_ = false;
     bool ready_ = false;
     bool hadBom_ = false;
@@ -92,6 +92,7 @@ private:
 
 std::string JsonQuote(const std::string& value);
 std::optional<std::string> JsonString(const std::string& json, const std::string& key);
+std::optional<bool> JsonBool(const std::string& json, const std::string& key);
 std::string PathToUtf8(const std::filesystem::path& path);
 
 }  // namespace mdviewer

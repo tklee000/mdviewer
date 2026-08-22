@@ -10,9 +10,11 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
-#include <cstring>
+#include <cwctype>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -23,6 +25,8 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"MdViewer.MainWindow";
 constexpr UINT kUiTaskMessage = WM_APP + 41;
 constexpr UINT_PTR kFileWatchTimer = 1;
+constexpr DWORD kEncodingGroupControlId = 2000;
+constexpr DWORD kEncodingComboControlId = 2001;
 constexpr DWORD kMainWindowStyle =
     WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
     WS_SYSMENU | WS_CLIPCHILDREN;
@@ -65,6 +69,72 @@ std::string ApplyLineEndings(const std::string& input, bool crlf) {
         output.push_back(character);
     }
     return output;
+}
+
+std::wstring EncodingName(TextEncoding encoding) {
+    switch (encoding) {
+    case TextEncoding::Ansi: return L"ANSI";
+    case TextEncoding::Utf8Bom: return L"UTF-8 BOM";
+    case TextEncoding::Utf16Le: return L"UTF-16 LE";
+    case TextEncoding::Utf16Be: return L"UTF-16 BE";
+    case TextEncoding::Utf8:
+    default: return L"UTF-8";
+    }
+}
+
+DWORD EncodingItemId(TextEncoding encoding) {
+    return static_cast<DWORD>(encoding) + 1;
+}
+
+TextEncoding EncodingFromItemId(DWORD itemId, TextEncoding fallback) {
+    if (itemId < EncodingItemId(TextEncoding::Ansi) ||
+        itemId > EncodingItemId(TextEncoding::Utf16Be)) return fallback;
+    return static_cast<TextEncoding>(itemId - 1);
+}
+
+bool EncodeText(const std::string& utf8, TextEncoding encoding,
+                std::string* output) {
+    if (!output) return false;
+    if (encoding == TextEncoding::Utf8 || encoding == TextEncoding::Utf8Bom) {
+        *output = utf8;
+        if (encoding == TextEncoding::Utf8Bom) output->insert(0, "\xEF\xBB\xBF", 3);
+        return true;
+    }
+
+    const std::wstring wide = json::Utf8ToWide(utf8, false);
+    if (!utf8.empty() && wide.empty()) return false;
+    if (encoding == TextEncoding::Ansi) {
+        if (wide.empty()) {
+            output->clear();
+            return true;
+        }
+        BOOL usedDefault = FALSE;
+        const int size = WideCharToMultiByte(
+            CP_ACP, WC_NO_BEST_FIT_CHARS, wide.data(),
+            static_cast<int>(wide.size()), nullptr, 0, nullptr, &usedDefault);
+        if (size <= 0 || usedDefault) return false;
+        output->assign(static_cast<size_t>(size), '\0');
+        usedDefault = FALSE;
+        const int converted = WideCharToMultiByte(
+            CP_ACP, WC_NO_BEST_FIT_CHARS, wide.data(),
+            static_cast<int>(wide.size()), output->data(), size,
+            nullptr, &usedDefault);
+        return converted == size && !usedDefault;
+    }
+
+    output->clear();
+    output->reserve(2 + wide.size() * 2);
+    const bool littleEndian = encoding == TextEncoding::Utf16Le;
+    output->push_back(static_cast<char>(littleEndian ? 0xFF : 0xFE));
+    output->push_back(static_cast<char>(littleEndian ? 0xFE : 0xFF));
+    for (wchar_t character : wide) {
+        const auto unit = static_cast<std::uint16_t>(character);
+        const char low = static_cast<char>(unit & 0xFF);
+        const char high = static_cast<char>((unit >> 8) & 0xFF);
+        output->push_back(littleEndian ? low : high);
+        output->push_back(littleEndian ? high : low);
+    }
+    return true;
 }
 
 std::wstring LastErrorMessage(DWORD error) {
@@ -182,7 +252,7 @@ bool DesktopApp::ShutdownBrowser() {
     alive_ = false;
     if (!browserHost_) return true;
     browserHost_->Close();
-    const bool closed = browserHost_->WaitForClose(1500);
+    const bool closed = browserHost_->WaitForClose(5000);
     browserHost_.reset();
     return closed;
 }
@@ -261,11 +331,10 @@ LRESULT DesktopApp::HandleWindowMessage(UINT message, WPARAM wParam,
         const size_t count = copyData->cbData / sizeof(wchar_t);
         const auto* value = static_cast<const wchar_t*>(copyData->lpData);
         if (value[count - 1] != L'\0') return FALSE;
-        ShowWindow(window_, SW_RESTORE);
-        SetForegroundWindow(window_);
         const std::wstring path(value);
-        if (!path.empty()) OpenDocument(path);
-        return TRUE;
+        const bool openedInNewWindow = !path.empty() &&
+            OpenExternalDocuments({path}, true);
+        return openedInNewWindow ? kMdViewerOpenedNewWindowResult : TRUE;
     }
     case WM_TIMER:
         if (wParam == kFileWatchTimer) CheckExternalFileChange();
@@ -276,6 +345,13 @@ LRESULT DesktopApp::HandleWindowMessage(UINT message, WPARAM wParam,
         if (callback && alive_) (*callback)();
         return 0;
     }
+    case WM_QUERYENDSESSION:
+        // Returning FALSE keeps Windows from ending the session while this
+        // window owns unsaved Markdown changes. Windows displays the block
+        // reason registered by UpdateShutdownProtection().
+        return document_.dirty ? FALSE : TRUE;
+    case WM_ENDSESSION:
+        return 0;
     case WM_CLOSE:
         if (browserCanClose_) {
             DestroyWindow(window_);
@@ -292,6 +368,7 @@ LRESULT DesktopApp::HandleWindowMessage(UINT message, WPARAM wParam,
     case WM_DESTROY:
         alive_ = false;
         KillTimer(window_, kFileWatchTimer);
+        ShutdownBlockReasonDestroy(window_);
         SaveWindowState();
         browserReady_ = false;
         if (browserHost_) browserHost_->Close();
@@ -333,6 +410,17 @@ void DesktopApp::UpdateWindowTitle() {
     const std::wstring title = name + (document_.dirty ? L" *" : L"") +
         L" — MdViewer";
     SetWindowTextW(window_, title.c_str());
+    UpdateShutdownProtection();
+}
+
+void DesktopApp::UpdateShutdownProtection() {
+    if (!window_) return;
+    if (document_.dirty) {
+        const std::wstring reason = Localized(L"Unsaved changes");
+        ShutdownBlockReasonCreate(window_, reason.c_str());
+    } else {
+        ShutdownBlockReasonDestroy(window_);
+    }
 }
 
 void DesktopApp::SaveWindowState() {
@@ -365,6 +453,10 @@ void DesktopApp::OnBrowserMessage(const std::string& message) {
     PostToUi([this, message] { HandleBrowserMessage(message); });
 }
 
+void DesktopApp::OnFilesDropped(const std::vector<std::wstring>& paths) {
+    PostToUi([this, paths] { OpenExternalDocuments(paths, false); });
+}
+
 void DesktopApp::OnBrowserLoadError(const std::wstring& message) {
     PostToUi([this, message] {
         ShowError(Localized(L"The embedded browser could not load the application UI.") +
@@ -381,9 +473,21 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
         SendWindowState();
     } else if (type == "document.changed") {
         const std::string text = json::GetString(message, "text").value_or(document_.text);
+        bool changed = false;
         if (text != document_.text) {
             document_.text = text;
-            document_.dirty = true;
+            changed = true;
+        }
+        if (const auto eol = json::GetString(message, "eol")) {
+            const bool crlf = *eol == "CRLF";
+            if ((*eol == "LF" || *eol == "CRLF") && crlf != document_.crlf) {
+                document_.crlf = crlf;
+                changed = true;
+            }
+        }
+        const auto reportedDirty = json::GetBool(message, "dirty");
+        if (reportedDirty || changed) {
+            document_.dirty = reportedDirty.value_or(true);
             UpdateWindowTitle();
         }
         editorMode_ = json::GetString(message, "mode").value_or(editorMode_);
@@ -446,7 +550,7 @@ void DesktopApp::SendDocumentState(const char* type) {
              ",\"name\":" + json::Quote(name) +
              ",\"text\":" + json::Quote(document_.text) +
              ",\"dirty\":" + (document_.dirty ? "true" : "false") +
-             ",\"encoding\":" + json::Quote(json::WideToUtf8(document_.encoding)) +
+             ",\"encoding\":" + json::Quote(json::WideToUtf8(EncodingName(document_.encoding))) +
              ",\"eol\":" + json::Quote(document_.crlf ? "CRLF" : "LF") + "}}");
 }
 
@@ -509,7 +613,7 @@ void DesktopApp::NewDocument() {
     document_ = Document{};
     document_.text.clear();
     document_.crlf = true;
-    editorMode_ = "source";
+    editorMode_ = "preview";
     externalChangeReported_ = false;
     if (resources_) resources_->SetDocumentDirectory(L"");
     UpdateWindowTitle();
@@ -519,6 +623,59 @@ void DesktopApp::NewDocument() {
 void DesktopApp::ChooseAndOpenDocument() {
     const std::wstring path = ChooseFileToOpen();
     if (!path.empty()) OpenDocument(path);
+}
+
+bool DesktopApp::OpenExternalDocuments(
+    const std::vector<std::wstring>& paths, bool activateCurrentWindow) {
+    std::vector<std::wstring> documents;
+    documents.reserve(paths.size());
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        std::error_code error;
+        const std::filesystem::path normalized =
+            std::filesystem::absolute(path, error).lexically_normal();
+        if (error || !std::filesystem::is_regular_file(normalized, error) || error) {
+            continue;
+        }
+        std::wstring extension = normalized.extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](wchar_t value) { return std::towlower(value); });
+        if (extension != L".md" && extension != L".markdown") continue;
+        const std::wstring value = normalized.wstring();
+        if (std::find(documents.begin(), documents.end(), value) == documents.end()) {
+            documents.push_back(value);
+        }
+    }
+    if (documents.empty()) return false;
+
+    size_t firstNewWindow = 0;
+    if (!document_.dirty) {
+        if (!OpenDocument(documents.front(), false)) return false;
+        firstNewWindow = 1;
+        if (activateCurrentWindow) {
+            ShowWindow(window_, SW_RESTORE);
+            SetForegroundWindow(window_);
+        }
+    }
+    bool openedInNewWindow = false;
+    for (size_t index = firstNewWindow; index < documents.size(); ++index) {
+        openedInNewWindow = LaunchNewWindow(documents[index]) || openedInNewWindow;
+    }
+    return firstNewWindow == 0 && openedInNewWindow;
+}
+
+bool DesktopApp::LaunchNewWindow(const std::wstring& path) {
+    const std::wstring executable = CurrentExecutablePath();
+    if (executable.empty()) return false;
+    const std::wstring arguments = L"--new-window \"" + path + L"\"";
+    const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+        window_, L"open", executable.c_str(), arguments.c_str(),
+        std::filesystem::path(path).parent_path().c_str(), SW_SHOWNORMAL));
+    if (result > 32) return true;
+    ShowError(Localized("Could not open {path}.",
+                        {{"path", json::WideToUtf8(path)}}),
+              Localized(L"File open error"));
+    return false;
 }
 
 bool DesktopApp::OpenDocument(const std::wstring& path, bool confirmCurrent) {
@@ -532,6 +689,7 @@ bool DesktopApp::OpenDocument(const std::wstring& path, bool confirmCurrent) {
         return false;
     }
     document_ = std::move(loaded);
+    editorMode_ = "preview";
     externalChangeReported_ = false;
     if (resources_) {
         resources_->SetDocumentDirectory(
@@ -559,27 +717,39 @@ bool DesktopApp::ReadDocument(const std::wstring& path, Document* result,
 
     Document loaded;
     loaded.path = std::filesystem::absolute(path).lexically_normal().wstring();
-    loaded.utf8Bom = bytes.size() >= 3 &&
+    const bool hasUtf8Bom = bytes.size() >= 3 &&
         static_cast<unsigned char>(bytes[0]) == 0xEF &&
         static_cast<unsigned char>(bytes[1]) == 0xBB &&
         static_cast<unsigned char>(bytes[2]) == 0xBF;
-    if (loaded.utf8Bom) bytes.erase(0, 3);
-
-    if (bytes.size() >= 2 &&
+    const bool hasUtf16LeBom = bytes.size() >= 2 &&
         static_cast<unsigned char>(bytes[0]) == 0xFF &&
-        static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        static_cast<unsigned char>(bytes[1]) == 0xFE;
+    const bool hasUtf16BeBom = bytes.size() >= 2 &&
+        static_cast<unsigned char>(bytes[0]) == 0xFE &&
+        static_cast<unsigned char>(bytes[1]) == 0xFF;
+
+    if (hasUtf8Bom) {
+        bytes.erase(0, 3);
+        loaded.encoding = TextEncoding::Utf8Bom;
+    } else if (hasUtf16LeBom || hasUtf16BeBom) {
         const size_t count = (bytes.size() - 2) / 2;
         std::wstring wide(count, L'\0');
-        std::memcpy(wide.data(), bytes.data() + 2, count * 2);
+        for (size_t index = 0; index < count; ++index) {
+            const auto first = static_cast<unsigned char>(bytes[2 + index * 2]);
+            const auto second = static_cast<unsigned char>(bytes[3 + index * 2]);
+            const std::uint16_t unit = hasUtf16LeBom
+                ? static_cast<std::uint16_t>(first | (second << 8))
+                : static_cast<std::uint16_t>((first << 8) | second);
+            wide[index] = static_cast<wchar_t>(unit);
+        }
         bytes = json::WideToUtf8(wide);
-        loaded.encoding = L"UTF-16 LE → UTF-8";
-        loaded.utf8Bom = false;
+        loaded.encoding = hasUtf16LeBom
+            ? TextEncoding::Utf16Le : TextEncoding::Utf16Be;
     } else if (!json::IsValidUtf8(bytes)) {
         bytes = json::WideToUtf8(json::Utf8ToWide(bytes, true));
-        loaded.encoding = L"ANSI → UTF-8";
-        loaded.utf8Bom = false;
+        loaded.encoding = TextEncoding::Ansi;
     } else {
-        loaded.encoding = loaded.utf8Bom ? L"UTF-8 BOM" : L"UTF-8";
+        loaded.encoding = TextEncoding::Utf8;
     }
 
     loaded.crlf = bytes.find("\r\n") != std::string::npos;
@@ -613,12 +783,15 @@ bool DesktopApp::SaveDocument() {
 }
 
 bool DesktopApp::SaveDocumentAs() {
-    const std::wstring path = ChooseFileToSave();
-    if (path.empty()) return false;
+    const auto selection = ChooseFileToSave();
+    if (!selection) return false;
     const std::wstring previousPath = document_.path;
-    document_.path = path;
+    const TextEncoding previousEncoding = document_.encoding;
+    document_.path = selection->path;
+    document_.encoding = selection->encoding;
     if (!SaveDocument()) {
         document_.path = previousPath;
+        document_.encoding = previousEncoding;
         return false;
     }
     if (resources_) {
@@ -630,8 +803,15 @@ bool DesktopApp::SaveDocumentAs() {
 
 bool DesktopApp::WriteDocument(const std::wstring& path,
                                std::wstring* errorMessage) {
-    std::string bytes = ApplyLineEndings(document_.text, document_.crlf);
-    if (document_.utf8Bom) bytes.insert(0, "\xEF\xBB\xBF", 3);
+    const std::string text = ApplyLineEndings(document_.text, document_.crlf);
+    std::string bytes;
+    if (!EncodeText(text, document_.encoding, &bytes)) {
+        if (errorMessage) {
+            *errorMessage = Localized(
+                L"The selected encoding cannot represent all characters in this document.");
+        }
+        return false;
+    }
     const std::wstring temporary = path + L".mdviewer." +
         std::to_wstring(GetCurrentProcessId()) + L".tmp";
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -655,7 +835,6 @@ bool DesktopApp::WriteDocument(const std::wstring& path,
         if (errorMessage) *errorMessage = LastErrorMessage(moveError);
         return false;
     }
-    document_.encoding = document_.utf8Bom ? L"UTF-8 BOM" : L"UTF-8";
     return true;
 }
 
@@ -675,25 +854,117 @@ std::wstring DesktopApp::ChooseFileToOpen() const {
     return GetOpenFileNameW(&dialog) ? std::wstring(path.data()) : std::wstring{};
 }
 
-std::wstring DesktopApp::ChooseFileToSave() const {
-    std::vector<wchar_t> path(32768, L'\0');
-    const std::wstring suggested = document_.path.empty()
-        ? Localized(L"Untitled") + L".md" : document_.path;
-    std::copy_n(suggested.begin(),
-                (std::min)(suggested.size(), path.size() - 1), path.begin());
-    const std::wstring filter = BuildFilter(
-        Localized(L"Markdown files"), Localized(L"All files"));
+std::optional<DesktopApp::SaveSelection> DesktopApp::ChooseFileToSave() const {
+    IFileSaveDialog* dialog = nullptr;
+    const HRESULT created = CoCreateInstance(
+        CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (FAILED(created) || !dialog) {
+        std::vector<wchar_t> path(32768, L'\0');
+        const std::wstring suggested = document_.path.empty()
+            ? Localized(L"Untitled") + L".md" : document_.path;
+        std::copy_n(suggested.begin(),
+                    (std::min)(suggested.size(), path.size() - 1), path.begin());
+        const std::wstring filter = BuildFilter(
+            Localized(L"Markdown files"), Localized(L"All files"));
+        const std::wstring title = Localized(L"Save Markdown file");
+        OPENFILENAMEW fallback{sizeof(fallback)};
+        fallback.hwndOwner = window_;
+        fallback.lpstrFilter = filter.c_str();
+        fallback.lpstrFile = path.data();
+        fallback.nMaxFile = static_cast<DWORD>(path.size());
+        fallback.lpstrDefExt = L"md";
+        fallback.lpstrTitle = title.c_str();
+        fallback.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
+                         OFN_EXPLORER | OFN_NOCHANGEDIR;
+        if (!GetSaveFileNameW(&fallback)) return std::nullopt;
+        return SaveSelection{std::wstring(path.data()), document_.encoding};
+    }
+
     const std::wstring title = Localized(L"Save Markdown file");
-    OPENFILENAMEW dialog{sizeof(dialog)};
-    dialog.hwndOwner = window_;
-    dialog.lpstrFilter = filter.c_str();
-    dialog.lpstrFile = path.data();
-    dialog.nMaxFile = static_cast<DWORD>(path.size());
-    dialog.lpstrDefExt = L"md";
-    dialog.lpstrTitle = title.c_str();
-    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
-                   OFN_EXPLORER | OFN_NOCHANGEDIR;
-    return GetSaveFileNameW(&dialog) ? std::wstring(path.data()) : std::wstring{};
+    const std::wstring markdownType =
+        Localized(L"Markdown files") + L" (*.md;*.markdown)";
+    const std::wstring allType = Localized(L"All files") + L" (*.*)";
+    const COMDLG_FILTERSPEC filters[] = {
+        {markdownType.c_str(), L"*.md;*.markdown"},
+        {allType.c_str(), L"*.*"},
+    };
+    dialog->SetTitle(title.c_str());
+    dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetDefaultExtension(L"md");
+    FILEOPENDIALOGOPTIONS options{};
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST |
+                           FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+    }
+
+    if (document_.path.empty()) {
+        const std::wstring suggested = Localized(L"Untitled") + L".md";
+        dialog->SetFileName(suggested.c_str());
+    } else {
+        const std::filesystem::path current(document_.path);
+        dialog->SetFileName(current.filename().c_str());
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                current.parent_path().c_str(), nullptr, IID_PPV_ARGS(&folder))) &&
+            folder) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+    }
+
+    IFileDialogCustomize* customize = nullptr;
+    if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize))) && customize) {
+        const std::wstring encodingLabel = Localized(L"Encoding");
+        customize->StartVisualGroup(kEncodingGroupControlId, encodingLabel.c_str());
+        customize->AddComboBox(kEncodingComboControlId);
+        const TextEncoding encodings[] = {
+            TextEncoding::Ansi,
+            TextEncoding::Utf8,
+            TextEncoding::Utf8Bom,
+            TextEncoding::Utf16Le,
+            TextEncoding::Utf16Be,
+        };
+        for (TextEncoding encoding : encodings) {
+            const std::wstring label = EncodingName(encoding);
+            customize->AddControlItem(
+                kEncodingComboControlId, EncodingItemId(encoding), label.c_str());
+        }
+        customize->SetSelectedControlItem(
+            kEncodingComboControlId, EncodingItemId(document_.encoding));
+        customize->EndVisualGroup();
+    }
+
+    const HRESULT shown = dialog->Show(window_);
+    if (FAILED(shown)) {
+        if (customize) customize->Release();
+        dialog->Release();
+        return std::nullopt;
+    }
+
+    TextEncoding selectedEncoding = document_.encoding;
+    if (customize) {
+        DWORD selectedItem = EncodingItemId(selectedEncoding);
+        if (SUCCEEDED(customize->GetSelectedControlItem(
+                kEncodingComboControlId, &selectedItem))) {
+            selectedEncoding = EncodingFromItemId(selectedItem, selectedEncoding);
+        }
+        customize->Release();
+    }
+
+    IShellItem* result = nullptr;
+    PWSTR selectedPath = nullptr;
+    const HRESULT resultStatus = dialog->GetResult(&result);
+    if (SUCCEEDED(resultStatus) && result) {
+        result->GetDisplayName(SIGDN_FILESYSPATH, &selectedPath);
+        result->Release();
+    }
+    dialog->Release();
+    if (!selectedPath) return std::nullopt;
+    SaveSelection selection{selectedPath, selectedEncoding};
+    CoTaskMemFree(selectedPath);
+    return selection;
 }
 
 void DesktopApp::CheckExternalFileChange() {

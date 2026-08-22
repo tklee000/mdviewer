@@ -9,13 +9,24 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 class UiResourceProvider;
 
 const wchar_t* MdViewerWindowClassName();
 constexpr ULONG_PTR kMdViewerOpenFileMessage = 0x4D445646;  // "MDVF"
+constexpr DWORD_PTR kMdViewerOpenedNewWindowResult = 2;
+
+enum class TextEncoding {
+    Ansi,
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+};
 
 class DesktopApp final : public BrowserHostDelegate {
 public:
@@ -27,6 +38,7 @@ public:
 
     void OnBrowserCreated() override;
     void OnBrowserMessage(const std::string& message) override;
+    void OnFilesDropped(const std::vector<std::wstring>& paths) override;
     void OnBrowserLoadError(const std::wstring& message) override;
 
 private:
@@ -34,11 +46,15 @@ private:
         std::wstring path;
         std::string text;
         bool dirty = false;
-        bool utf8Bom = false;
         bool crlf = true;
-        std::wstring encoding = L"UTF-8";
+        TextEncoding encoding = TextEncoding::Utf8;
         std::filesystem::file_time_type diskWriteTime{};
         bool hasDiskWriteTime = false;
+    };
+
+    struct SaveSelection {
+        std::wstring path;
+        TextEncoding encoding = TextEncoding::Utf8;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message,
@@ -51,6 +67,7 @@ private:
     void ResizeBrowser();
     void BeginBrowserClose();
     void UpdateWindowTitle();
+    void UpdateShutdownProtection();
     void SaveWindowState();
     void PostToUi(std::function<void()> callback);
 
@@ -65,6 +82,9 @@ private:
     bool ConfirmSaveChanges();
     void NewDocument();
     void ChooseAndOpenDocument();
+    bool OpenExternalDocuments(const std::vector<std::wstring>& paths,
+                               bool activateCurrentWindow);
+    bool LaunchNewWindow(const std::wstring& path);
     bool OpenDocument(const std::wstring& path, bool confirmCurrent = true);
     bool ReadDocument(const std::wstring& path, Document* result,
                       std::wstring* errorMessage) const;
@@ -72,7 +92,7 @@ private:
     bool SaveDocumentAs();
     bool WriteDocument(const std::wstring& path, std::wstring* errorMessage);
     std::wstring ChooseFileToOpen() const;
-    std::wstring ChooseFileToSave() const;
+    std::optional<SaveSelection> ChooseFileToSave() const;
     void CheckExternalFileChange();
 
     std::wstring Localized(const std::wstring& english) const;
@@ -87,7 +107,7 @@ private:
     ConfigStore configStore_;
     AppConfig config_;
     Document document_;
-    std::string editorMode_ = "source";
+    std::string editorMode_ = "preview";
     std::shared_ptr<UiResourceProvider> resources_;
     std::unique_ptr<BrowserHost> browserHost_;
     bool browserReady_ = false;

@@ -24,6 +24,10 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 - Source/preview editing switch from both the title bar menu and toolbar
 - Editable headings, paragraphs, emphasis, links, images, lists, task lists,
   blockquotes, fenced code blocks, horizontal rules, and tables
+- Professional formatting toolbar with undo/redo, strikethrough, inline/block
+  code, list variants, image embedding, table grid insertion, contextual table
+  row/column editing, indentation, and clear-formatting commands
+- Command-level undo/redo for toolbar actions in both source and preview modes
 - Safe relative image loading from the Markdown document directory
 - External file-change detection
 - Runtime UI language switching across 12 languages
@@ -32,7 +36,7 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 
 The current preview serializer intentionally treats Markdown as the canonical
 document format. YAML front matter is displayed as a protected block. Complex
-extensions such as footnotes, math, Mermaid, nested mixed lists, and arbitrary
+extensions such as footnotes, math, Mermaid, and arbitrary
 HTML still require the round-trip work described in `플랜.md`.
 
 ## Build

@@ -4,6 +4,7 @@
 /x64/
 /deploy/
 /build/
+/packages/
 /cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
@@ -34,4 +35,3 @@ CMakeFiles/
 Thumbs.db
 *.swp
 *.tmp
-

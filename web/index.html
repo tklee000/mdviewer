@@ -16,15 +16,38 @@
       </div>
 
       <nav class="main-menu" aria-label="Main menu" data-i18n-aria-label="Main menu">
-        <div class="menu-root">
+        <div class="menu-root" data-file-menu-root>
           <button class="menu-trigger" type="button" aria-haspopup="true" aria-expanded="false"
                   data-menu-title data-i18n="&amp;File">File</button>
           <div class="menu-popup" role="menu" hidden>
             <button type="button" role="menuitem" data-menu-command="file.new" data-i18n="&amp;New	Ctrl+N">&amp;New</button>
             <button type="button" role="menuitem" data-menu-command="file.open" data-i18n="&amp;Open...	Ctrl+O">&amp;Open...</button>
+            <button type="button" role="menuitem" data-menu-command="file.openGoogleDrive"
+                    class="provider-menu-item">
+              <span class="google-drive-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false"><path fill="#0F9D58" d="M8.3 3h4.5l7.4 12.8h-4.6z"/><path fill="#4285F4" d="M6 15.8h14.2L18 19.7H3.8z"/><path fill="#F4B400" d="M8.3 3 3.8 10.8 6 14.7l6.8-11.7z"/></svg>
+              </span>
+              <span data-i18n="Open from Google Drive">Open from Google Drive</span>
+            </button>
+            <div class="menu-submenu">
+              <button type="button" class="submenu-trigger" role="menuitem" aria-haspopup="true">
+                <span data-i18n="Recent documents">Recent documents</span><span aria-hidden="true">›</span>
+              </button>
+              <div id="recent-documents-menu" class="menu-popup submenu-popup recent-documents-menu"
+                   role="menu">
+                <button type="button" role="menuitem" disabled data-i18n="No recent documents">No recent documents</button>
+              </div>
+            </div>
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="file.save" data-i18n="&amp;Save	Ctrl+S">&amp;Save</button>
             <button type="button" role="menuitem" data-menu-command="file.saveAs" data-i18n="Save &amp;As...	Ctrl+Shift+S">Save &amp;As...</button>
+            <button type="button" role="menuitem" data-menu-command="file.saveGoogleDriveAs"
+                    class="provider-menu-item">
+              <span class="google-drive-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false"><path fill="#0F9D58" d="M8.3 3h4.5l7.4 12.8h-4.6z"/><path fill="#4285F4" d="M6 15.8h14.2L18 19.7H3.8z"/><path fill="#F4B400" d="M8.3 3 3.8 10.8 6 14.7l6.8-11.7z"/></svg>
+              </span>
+              <span data-i18n="Save to Google Drive As…">Save to Google Drive As…</span>
+            </button>
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="app.exit" data-i18n="E&amp;xit">E&amp;xit</button>
           </div>
@@ -275,6 +298,8 @@
     </footer>
   </div>
 
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
   <dialog id="font-settings-dialog" class="settings-dialog" aria-labelledby="font-settings-title">
     <form id="font-settings-form" method="dialog">
       <header class="settings-dialog-header">
@@ -358,6 +383,32 @@
       <footer class="settings-dialog-actions">
         <button type="button" data-image-dialog-cancel data-i18n="Cancel">Cancel</button>
         <button class="primary" type="submit" data-i18n="Insert">Insert</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="google-drive-save-dialog" class="settings-dialog insert-dialog"
+          aria-labelledby="google-drive-save-dialog-title">
+    <form id="google-drive-save-form" method="dialog">
+      <header class="settings-dialog-header">
+        <h2 id="google-drive-save-dialog-title" data-i18n="Save to Google Drive As…">Save to Google Drive As…</h2>
+        <button class="dialog-close-button" type="button" data-google-drive-save-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+      <div class="insert-dialog-body">
+        <label class="dialog-field">
+          <span data-i18n="File name">File name</span>
+          <input id="google-drive-file-name" type="text" maxlength="255"
+                 autocomplete="off" required>
+        </label>
+        <label class="dialog-check-field">
+          <input id="google-drive-choose-folder" type="checkbox" checked>
+          <span data-i18n="Choose a destination folder">Choose a destination folder</span>
+        </label>
+        <p class="dialog-hint" data-i18n="If unchecked, the file is saved in My Drive.">If unchecked, the file is saved in My Drive.</p>
+      </div>
+      <footer class="settings-dialog-actions">
+        <button type="button" data-google-drive-save-cancel data-i18n="Cancel">Cancel</button>
+        <button class="primary" type="submit" data-i18n="Save to Drive">Save to Drive</button>
       </footer>
     </form>
   </dialog>

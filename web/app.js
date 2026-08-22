@@ -40,6 +40,8 @@
     mode: "preview",
     activeEditor: "preview",
     path: "",
+    origin: "local",
+    format: "markdown",
     name: "Untitled",
     dirty: false,
     encoding: "UTF-8",
@@ -56,6 +58,7 @@
     splitRatio: Math.min(75, Math.max(25,
       Number(localStorage.getItem("mdviewer.splitRatio")) || 50)),
     previewChanged: false,
+    googleDriveBusy: false,
     applying: false
   };
   let previewSelectionRange = null;
@@ -68,6 +71,10 @@
   let splitScrollFrame = 0;
   let synchronizingSplitScroll = false;
   let pendingImageSourceSelection = null;
+  let pendingImageFileName = "";
+  let recentDocumentItems = [];
+  let toastHideTimer = 0;
+  let toastRemoveTimer = 0;
   const splitMinimumWidth = 860;
 
   function activeEditorMode() {
@@ -88,6 +95,48 @@
     if (!bridge?.postMessage) return false;
     bridge.postMessage(JSON.stringify({ type, ...payload }));
     return true;
+  }
+
+  function showToast(message, tone = "info", title = "") {
+    const region = $("#toast-region");
+    const tones = {
+      success: { icon: "✓", duration: 2800 },
+      info: { icon: "i", duration: 3800 },
+      warning: { icon: "!", duration: 5000 },
+      error: { icon: "×", duration: 6000 }
+    };
+    const normalizedTone = Object.hasOwn(tones, tone) ? tone : "info";
+    const presentation = tones[normalizedTone];
+    clearTimeout(toastHideTimer);
+    clearTimeout(toastRemoveTimer);
+    const toast = document.createElement("div");
+    toast.className = `toast-notification ${normalizedTone}`;
+    toast.setAttribute("role", ["warning", "error"].includes(normalizedTone) ? "alert" : "status");
+    const icon = document.createElement("span");
+    icon.className = "toast-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = presentation.icon;
+    const content = document.createElement("span");
+    content.className = "toast-content";
+    if (title) {
+      const heading = document.createElement("span");
+      heading.className = "toast-title";
+      heading.textContent = title;
+      content.append(heading);
+    }
+    const text = document.createElement("span");
+    text.className = "toast-message";
+    text.textContent = message;
+    content.append(text);
+    toast.append(icon, content);
+    region.replaceChildren(toast);
+    requestAnimationFrame(() => toast.classList.add("is-visible"));
+    toastHideTimer = setTimeout(() => {
+      toast.classList.remove("is-visible");
+      toastRemoveTimer = setTimeout(() => {
+        if (region.firstElementChild === toast) region.replaceChildren();
+      }, 180);
+    }, presentation.duration);
   }
 
   function applyTheme(theme) {
@@ -708,10 +757,13 @@
   }
 
   function updateChrome() {
-    $("#document-name").textContent = state.path ? state.name : i18n.t("Untitled");
+    $("#document-name").textContent = state.path || state.origin === "googleDrive"
+      ? state.name : i18n.t("Untitled");
     $("#dirty-indicator").hidden = !state.dirty;
-    $("#save-status").textContent = i18n.t(state.dirty ? "Unsaved changes" : "Saved");
-    $("#encoding-status").textContent = state.encoding;
+    $("#save-status").textContent = i18n.t(state.googleDriveBusy
+      ? "Working with Google Drive…" : state.dirty ? "Unsaved changes" : "Saved");
+    $("#encoding-status").textContent = state.format === "mdz"
+      ? `MDZ · ${state.encoding}` : state.encoding;
     $("#eol-status").textContent = state.eol;
     const modeToggle = $("#mode-toggle-button");
     const modeKeys = { source: "Source", split: "Split", preview: "Preview" };
@@ -731,6 +783,8 @@
     });
     $$('[data-eol-menu]').forEach((item) =>
       item.setAttribute("aria-checked", String(item.dataset.eolMenu === state.eol)));
+    $$('[data-menu-command="file.openGoogleDrive"], [data-menu-command="file.saveGoogleDriveAs"]')
+      .forEach((item) => { item.disabled = state.googleDriveBusy; });
     updateHeadingChrome();
     updateFormattingChrome();
     updatePosition();
@@ -780,6 +834,8 @@
 
   function applyDocument(documentState, resetEditor = true) {
     state.path = documentState.path || "";
+    state.origin = documentState.origin === "googleDrive" ? "googleDrive" : "local";
+    state.format = documentState.format === "mdz" ? "mdz" : "markdown";
     state.name = documentState.name || i18n.t("Untitled");
     state.text = documentState.text || "";
     state.dirty = Boolean(documentState.dirty);
@@ -1241,6 +1297,7 @@
         end: sourceEditor.selectionEnd
       };
     }
+    pendingImageFileName = "";
     $("#image-dialog-form").reset();
     $("#image-dialog").showModal();
     $("#image-alt-input").focus();
@@ -1250,6 +1307,18 @@
     const normalizedSource = normalizeImageSource(source);
     if (!normalizedSource) return;
     const safeAlt = String(alt || "").replaceAll("\\", "\\\\").replaceAll("]", "\\]").replaceAll("\n", " ");
+    if (state.format === "mdz" &&
+        /^data:image\/(?:png|jpeg|gif|webp|bmp);base64,/i.test(normalizedSource)) {
+      if (!post("image.embed", {
+        dataUrl: normalizedSource,
+        fileName: pendingImageFileName || "image",
+        alt: safeAlt
+      })) {
+        pendingImageSourceSelection = null;
+        pendingImageFileName = "";
+      }
+      return;
+    }
     if (activeEditorMode() === "source") {
       if (pendingImageSourceSelection) {
         sourceEditor.setSelectionRange(pendingImageSourceSelection.start, pendingImageSourceSelection.end);
@@ -1264,6 +1333,7 @@
       });
     }
     pendingImageSourceSelection = null;
+    pendingImageFileName = "";
   }
 
   function fileToDataUrl(file) {
@@ -1505,6 +1575,51 @@
     redoButton.disabled = documentRedoHistory.length === 0;
   }
 
+  function createGoogleDriveMark() {
+    const mark = document.createElement("span");
+    mark.className = "google-drive-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = '<svg viewBox="0 0 24 24" focusable="false">' +
+      '<path fill="#0F9D58" d="M8.3 3h4.5l7.4 12.8h-4.6z"/>' +
+      '<path fill="#4285F4" d="M6 15.8h14.2L18 19.7H3.8z"/>' +
+      '<path fill="#F4B400" d="M8.3 3 3.8 10.8 6 14.7l6.8-11.7z"/></svg>';
+    return mark;
+  }
+
+  function populateRecentDocuments(documents) {
+    const menu = $("#recent-documents-menu");
+    if (Array.isArray(documents)) recentDocumentItems = documents;
+    const safeDocuments = recentDocumentItems.slice(0, 10).filter((item) =>
+      item && ["local", "googleDrive"].includes(item.kind) &&
+      typeof item.location === "string" && item.location &&
+      typeof item.name === "string");
+    if (!safeDocuments.length) {
+      const empty = document.createElement("button");
+      empty.type = "button";
+      empty.disabled = true;
+      empty.setAttribute("role", "menuitem");
+      empty.textContent = i18n.t("No recent documents");
+      menu.replaceChildren(empty);
+      return;
+    }
+    menu.replaceChildren(...safeDocuments.map((recent) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "menuitem");
+      button.className = `recent-document-item ${recent.kind === "googleDrive" ? "google-drive" : "local"}`;
+      button.dataset.recentKind = recent.kind;
+      button.dataset.recentLocation = recent.location;
+      button.title = recent.kind === "googleDrive"
+        ? `${i18n.t("Google Drive")}: ${recent.name}` : recent.location;
+      if (recent.kind === "googleDrive") button.append(createGoogleDriveMark());
+      const name = document.createElement("span");
+      name.className = "recent-document-name";
+      name.textContent = recent.name;
+      button.append(name);
+      return button;
+    }));
+  }
+
   function populateLanguages() {
     const menu = $("#language-menu");
     menu.replaceChildren(...Object.entries(i18n.supportedLocales).map(([locale, descriptor]) => {
@@ -1568,6 +1683,7 @@
     const opening = popup.hidden;
     closeMenus();
     if (opening) {
+      if (root.matches("[data-file-menu-root]")) post("recent.refresh");
       popup.hidden = false;
       trigger.setAttribute("aria-expanded", "true");
     }
@@ -1580,8 +1696,37 @@
     post("settings.languageChanged", { locale: applied });
   }
 
+  function normalizeGoogleDriveFileName(value) {
+    let name = String(value || "").trim();
+    if (!name || name.length > 255 || /[\\/\r\n\0]/.test(name)) return "";
+    if (!/\.[^.]+$/.test(name)) name += ".md";
+    return /\.(?:md|markdown|mdz)$/i.test(name) ? name : "";
+  }
+
+  function openGoogleDriveSaveDialog() {
+    if (state.googleDriveBusy) return;
+    const dialog = $("#google-drive-save-dialog");
+    const input = $("#google-drive-file-name");
+    let suggested = state.name && state.name !== i18n.t("Untitled")
+      ? state.name : `${i18n.t("Untitled")}.md`;
+    if (!/\.(?:md|markdown|mdz)$/i.test(suggested)) {
+      suggested += state.format === "mdz" ? ".mdz" : ".md";
+    }
+    input.value = suggested;
+    input.setCustomValidity("");
+    $("#google-drive-choose-folder").checked = true;
+    dialog.showModal();
+    requestAnimationFrame(() => {
+      input.focus();
+      const extension = suggested.lastIndexOf(".");
+      input.setSelectionRange(0, extension > 0 ? extension : suggested.length);
+    });
+  }
+
   function executeMenuCommand(name) {
-    if (name.startsWith("file.") || name.startsWith("app.")) {
+    if (name === "file.saveGoogleDriveAs") {
+      openGoogleDriveSaveDialog();
+    } else if (name.startsWith("file.") || name.startsWith("app.")) {
       post("command", { name });
     } else if (name.startsWith("edit.")) {
       editorCommand(name.slice(5));
@@ -1755,11 +1900,13 @@
     $$('[data-image-dialog-cancel]').forEach((button) =>
       button.addEventListener("click", () => {
         pendingImageSourceSelection = null;
+        pendingImageFileName = "";
         imageDialog.close("cancel");
       }));
     imageDialog.addEventListener("click", (event) => {
       if (event.target === imageDialog) {
         pendingImageSourceSelection = null;
+        pendingImageFileName = "";
         imageDialog.close("cancel");
       }
     });
@@ -1768,6 +1915,7 @@
       const file = event.target.files?.[0];
       if (!file) return;
       try {
+        pendingImageFileName = file.name || "image";
         $("#image-source-input").value = await fileToDataUrl(file);
         if (!$("#image-alt-input").value) {
           $("#image-alt-input").value = file.name.replace(/\.[^.]+$/, "");
@@ -1777,6 +1925,29 @@
       } finally {
         event.target.value = "";
       }
+    });
+
+    const googleDriveSaveDialog = $("#google-drive-save-dialog");
+    const googleDriveFileName = $("#google-drive-file-name");
+    googleDriveFileName.addEventListener("input", () =>
+      googleDriveFileName.setCustomValidity(""));
+    $("#google-drive-save-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const fileName = normalizeGoogleDriveFileName(googleDriveFileName.value);
+      if (!fileName) {
+        googleDriveFileName.setCustomValidity(
+          i18n.t("Use a .md or .markdown file name."));
+        googleDriveFileName.reportValidity();
+        return;
+      }
+      const chooseFolder = $("#google-drive-choose-folder").checked;
+      googleDriveSaveDialog.close("save");
+      post("command", { name: "file.saveGoogleDriveAs", fileName, chooseFolder });
+    });
+    $$('[data-google-drive-save-cancel]').forEach((button) =>
+      button.addEventListener("click", () => googleDriveSaveDialog.close("cancel")));
+    googleDriveSaveDialog.addEventListener("click", (event) => {
+      if (event.target === googleDriveSaveDialog) googleDriveSaveDialog.close("cancel");
     });
 
     $("#table-size-grid").addEventListener("pointerover", (event) => {
@@ -1803,6 +1974,15 @@
       const item = event.target.closest("[data-locale]");
       if (!item) return;
       chooseLanguage(item.dataset.locale);
+      closeMenus();
+    });
+    $("#recent-documents-menu").addEventListener("click", (event) => {
+      const item = event.target.closest("[data-recent-kind][data-recent-location]");
+      if (!item) return;
+      post("recent.open", {
+        kind: item.dataset.recentKind,
+        location: item.dataset.recentLocation
+      });
       closeMenus();
     });
     document.addEventListener("pointerdown", (event) => {
@@ -1919,6 +2099,7 @@
           const dataUrl = await fileToDataUrl(file);
           if (activeEditorMode() !== pasteMode) return;
           pendingImageSourceSelection = sourceSelection;
+          pendingImageFileName = file.name || "image";
           insertImage(dataUrl, file.name ? file.name.replace(/\.[^.]+$/, "") : "");
         } catch (error) {
           console.error(error);
@@ -1981,12 +2162,42 @@
       } else if (message.type === "document.saved") {
         state.dirty = false;
         state.path = message.document?.path || state.path;
+        state.origin = message.document?.origin || state.origin;
+        state.format = message.document?.format === "mdz" ? "mdz" : "markdown";
         state.name = message.document?.name || state.name;
         state.encoding = message.document?.encoding || state.encoding;
         state.eol = message.document?.eol || state.eol;
         state.savedText = state.text;
         state.savedEol = state.eol;
         updateChrome();
+        if (message.document?.origin === "googleDrive") {
+          showToast(i18n.t("Saved to Google Drive: {name}", { name: state.name }), "success");
+        }
+      } else if (message.type === "document.savedSnapshot") {
+        const documentState = message.document || {};
+        state.path = documentState.path || "";
+        state.origin = documentState.origin === "googleDrive" ? "googleDrive" : "local";
+        state.format = documentState.format === "mdz" ? "mdz" : "markdown";
+        state.name = documentState.name || state.name;
+        state.encoding = documentState.encoding || state.encoding;
+        state.eol = documentState.eol || state.eol;
+        state.savedText = typeof message.savedText === "string"
+          ? message.savedText : state.savedText;
+        state.savedEol = message.savedEol === "LF" ? "LF" : "CRLF";
+        state.dirty = state.text !== state.savedText || state.eol !== state.savedEol;
+        updateChrome();
+      } else if (message.type === "recent.changed") {
+        populateRecentDocuments(message.documents);
+      } else if (message.type === "googleDrive.busy") {
+        state.googleDriveBusy = Boolean(message.busy);
+        updateChrome();
+      } else if (message.type === "googleDrive.savedOlderRevision") {
+        $("#save-status").textContent = i18n.t("Drive saved; newer local changes remain");
+        showToast(i18n.t("Drive saved; newer local changes remain"), "warning");
+      } else if (message.type === "native.toast") {
+        showToast(message.message || "", message.tone || "info", message.title || "");
+      } else if (message.type === "image.embedded") {
+        insertImage(message.path || "", message.alt || "");
       } else if (message.type === "editor.setMode") {
         setMode(message.mode, false);
       } else if (message.type === "editor.command") {
@@ -2009,7 +2220,10 @@
       }
     });
 
-    window.addEventListener("mdviewerlanguageapplied", updateChrome);
+    window.addEventListener("mdviewerlanguageapplied", () => {
+      updateChrome();
+      populateRecentDocuments();
+    });
     window.addEventListener("resize", () => {
       if (state.mode === "split" && innerWidth < splitMinimumWidth) setMode(activeEditorMode());
       else updateChrome();

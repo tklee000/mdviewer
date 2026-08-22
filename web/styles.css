@@ -107,6 +107,59 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 button.primary { color: white; background: var(--accent); }
 button.primary:hover { background: var(--accent-strong); color: white; }
 
+.toast-region {
+  position: fixed;
+  right: 18px;
+  bottom: 42px;
+  z-index: 1200;
+  display: grid;
+  justify-items: end;
+  max-width: min(420px, calc(100vw - 36px));
+  pointer-events: none;
+}
+.toast-notification {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid #2ea66f;
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .32);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.toast-notification.is-visible { opacity: 1; transform: translateY(0); }
+.toast-notification.info { border-left-color: #7a8490; }
+.toast-notification.warning { border-left-color: #d89b37; }
+.toast-notification.error { border-left-color: #d45a5a; }
+.toast-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: white;
+  background: #23845a;
+  font-size: 14px;
+  font-weight: 750;
+}
+.toast-notification.info .toast-icon { background: #66717d; }
+.toast-notification.warning .toast-icon { background: #a66b16; }
+.toast-notification.error .toast-icon { background: #b54747; }
+.toast-content { display: grid; min-width: 0; gap: 2px; }
+.toast-title { font-size: 13px; font-weight: 750; }
+.toast-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
 .settings-dialog {
   width: min(620px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
@@ -166,6 +219,14 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   color: var(--text);
   background: var(--surface-soft);
 }
+.dialog-check-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  cursor: pointer;
+}
+.dialog-check-field input { width: 16px; height: 16px; accent-color: var(--accent); }
 .insert-dialog { width: min(560px, calc(100vw - 32px)); }
 .insert-dialog-body { display: grid; gap: 16px; padding: 20px; }
 .dialog-input-action { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
@@ -183,6 +244,10 @@ button.primary:hover { background: var(--accent-strong); color: white; }
 
 @media (max-width: 520px) {
   .font-settings-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-notification { transition: none; }
 }
 
 .app-shell {
@@ -262,6 +327,29 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   white-space: pre;
 }
 .menu-popup button:hover, .menu-popup button:focus-visible { background: var(--accent-soft); }
+.menu-popup .provider-menu-item,
+.menu-popup .recent-document-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.google-drive-mark {
+  display: inline-flex;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  align-items: center;
+  justify-content: center;
+}
+.google-drive-mark svg { display: block; width: 17px; height: 17px; }
+.recent-document-item .recent-document-name {
+  min-width: 0;
+  max-width: 310px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-document-item.local { padding-left: 35px; }
+.recent-documents-menu { max-height: min(390px, calc(100vh - 90px)); overflow-y: auto; }
 .menu-popup button[role="menuitemradio"],
 .menu-popup button[role="menuitemcheckbox"] { padding-left: 28px; }
 .menu-popup button[role="menuitemradio"][aria-checked="true"]::before,

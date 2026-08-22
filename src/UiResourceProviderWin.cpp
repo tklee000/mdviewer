@@ -1,6 +1,7 @@
 #include "UiResourceProvider.h"
 
 #include "Json.h"
+#include "MdzArchive.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -129,6 +130,45 @@ const char* ImageMimeType(const std::filesystem::path& path) {
     return nullptr;
 }
 
+std::optional<std::string> ResolveArchiveReference(
+    const std::string& entryPoint, const std::string& reference) {
+    if (reference.empty() || reference.front() == '/' ||
+        reference.find('\\') != std::string::npos) return std::nullopt;
+    std::vector<std::string> segments;
+    const size_t baseEnd = entryPoint.find_last_of('/');
+    if (baseEnd != std::string::npos) {
+        size_t start = 0;
+        while (start < baseEnd) {
+            const size_t slash = entryPoint.find('/', start);
+            const size_t end = (std::min)(slash, baseEnd);
+            if (end > start) segments.push_back(entryPoint.substr(start, end - start));
+            if (slash == std::string::npos || slash >= baseEnd) break;
+            start = slash + 1;
+        }
+    }
+    size_t start = 0;
+    while (start <= reference.size()) {
+        const size_t slash = reference.find('/', start);
+        const size_t end = slash == std::string::npos ? reference.size() : slash;
+        const std::string segment = reference.substr(start, end - start);
+        if (segment.empty() || segment == ".") {
+        } else if (segment == "..") {
+            if (segments.empty()) return std::nullopt;
+            segments.pop_back();
+        } else {
+            segments.push_back(segment);
+        }
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    std::string result;
+    for (const auto& segment : segments) {
+        if (!result.empty()) result.push_back('/');
+        result += segment;
+    }
+    return mdz::IsSafeArchivePath(result) ? std::optional(result) : std::nullopt;
+}
+
 class WindowsUiResourceProvider final : public UiResourceProvider {
 public:
     explicit WindowsUiResourceProvider(HINSTANCE instance)
@@ -172,11 +212,21 @@ public:
 
     void SetDocumentDirectory(const std::wstring& directory) override {
         std::lock_guard<std::mutex> lock(documentMutex_);
+        documentArchive_.reset();
+        archiveEntryPoint_.clear();
         std::error_code error;
         documentDirectory_ = directory.empty()
             ? std::filesystem::path{}
             : std::filesystem::weakly_canonical(directory, error);
         if (error) documentDirectory_.clear();
+    }
+
+    void SetDocumentArchive(std::shared_ptr<const mdz::Entries> entries,
+                            const std::string& entryPoint) override {
+        std::lock_guard<std::mutex> lock(documentMutex_);
+        documentDirectory_.clear();
+        documentArchive_ = std::move(entries);
+        archiveEntryPoint_ = entryPoint;
     }
 
 private:
@@ -187,9 +237,28 @@ private:
         if (!decoded || !json::IsValidUtf8(*decoded)) return result;
 
         std::filesystem::path root;
+        std::shared_ptr<const mdz::Entries> archive;
+        std::string entryPoint;
         {
             std::lock_guard<std::mutex> lock(documentMutex_);
             root = documentDirectory_;
+            archive = documentArchive_;
+            entryPoint = archiveEntryPoint_;
+        }
+        if (archive) {
+            const auto path = ResolveArchiveReference(entryPoint, *decoded);
+            if (!path) return result;
+            const auto item = archive->find(*path);
+            if (item == archive->end()) return result;
+            const char* mimeType = ImageMimeType(
+                std::filesystem::path(json::Utf8ToWide(*path, false)));
+            if (!mimeType || item->second.empty()) return result;
+            result.statusCode = 200;
+            result.statusText = "OK";
+            result.mimeType = mimeType;
+            result.charset.clear();
+            result.bytes = item->second;
+            return result;
         }
         if (root.empty()) return result;
 
@@ -217,6 +286,8 @@ private:
     std::optional<std::filesystem::path> developmentDirectory_;
     mutable std::mutex documentMutex_;
     std::filesystem::path documentDirectory_;
+    std::shared_ptr<const mdz::Entries> documentArchive_;
+    std::string archiveEntryPoint_;
 };
 
 }  // namespace

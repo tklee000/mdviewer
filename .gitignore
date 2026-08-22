@@ -35,3 +35,7 @@ CMakeFiles/
 Thumbs.db
 *.swp
 *.tmp
+
+# Local Google OAuth/Picker credentials must never enter source control
+google-drive.ini
+client_secret_*.json

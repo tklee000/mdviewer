@@ -154,6 +154,23 @@ std::optional<bool> GetBool(const std::string& object,
     return std::nullopt;
 }
 
+std::optional<std::int64_t> GetInteger(const std::string& object,
+                                       const std::string& key) {
+    const auto start = FindValue(object, key);
+    if (!start || *start >= object.size()) return std::nullopt;
+    size_t end = *start;
+    if (object[end] == '-') ++end;
+    const size_t digits = end;
+    while (end < object.size() &&
+           std::isdigit(static_cast<unsigned char>(object[end]))) ++end;
+    if (end == digits) return std::nullopt;
+    try {
+        return std::stoll(object.substr(*start, end - *start));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
     const int size = WideCharToMultiByte(

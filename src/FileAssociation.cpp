@@ -157,6 +157,8 @@ bool WriteApplicationRegistration(const std::wstring& executablePath) {
                         applicationRoot + L"\\SupportedTypes", L".md", L"") && success;
     success = SetString(HKEY_CURRENT_USER,
                         applicationRoot + L"\\SupportedTypes", L".markdown", L"") && success;
+    success = SetString(HKEY_CURRENT_USER,
+                        applicationRoot + L"\\SupportedTypes", L".mdz", L"") && success;
 
     const std::wstring capabilities = L"Software\\MdViewer\\Capabilities";
     success = SetString(HKEY_CURRENT_USER, capabilities,
@@ -165,6 +167,8 @@ bool WriteApplicationRegistration(const std::wstring& executablePath) {
                         L".md", kCanonicalProgId) && success;
     success = SetString(HKEY_CURRENT_USER, capabilities + L"\\FileAssociations",
                         L".markdown", kCanonicalProgId) && success;
+    success = SetString(HKEY_CURRENT_USER, capabilities + L"\\FileAssociations",
+                        L".mdz", kCanonicalProgId) && success;
     success = SetString(HKEY_CURRENT_USER, L"Software\\RegisteredApplications",
                         kApplicationName, capabilities) && success;
     return success;
@@ -186,20 +190,37 @@ FileAssociationState CheckAndRepairMarkdownAssociation(
     const std::wstring& executablePath) {
     const std::wstring effectiveExecutable = EffectiveExecutable(L".md");
     const std::wstring effectiveProgId = EffectiveProgId(L".md");
+    std::wstring mdzExecutable = EffectiveExecutable(L".mdz");
+    std::wstring mdzProgId = EffectiveProgId(L".mdz");
 
     WriteProgId(kCanonicalProgId, executablePath);
     WriteApplicationRegistration(executablePath);
     WriteOpenWithRegistration(L".md");
     WriteOpenWithRegistration(L".markdown");
+    WriteOpenWithRegistration(L".mdz");
+    if (mdzProgId.empty()) {
+        const std::wstring extensionRoot = std::wstring(kClassesRoot) + L".mdz";
+        if (SetString(HKEY_CURRENT_USER, extensionRoot, nullptr,
+                      kCanonicalProgId)) {
+            mdzProgId = kCanonicalProgId;
+            mdzExecutable = executablePath;
+            NotifyAssociationChanged();
+        }
+    }
 
-    if (!effectiveProgId.empty() &&
-        SamePath(effectiveExecutable, executablePath)) {
+    if (!effectiveProgId.empty() && !mdzProgId.empty() &&
+        SamePath(effectiveExecutable, executablePath) &&
+        SamePath(mdzExecutable, executablePath)) {
         return FileAssociationState::Current;
     }
-    if (!effectiveProgId.empty() &&
+    if (!effectiveProgId.empty() && !mdzProgId.empty() &&
         (IsMdViewerProgId(effectiveProgId) ||
-         IsMdViewerExecutable(effectiveExecutable))) {
+         IsMdViewerExecutable(effectiveExecutable)) &&
+        (IsMdViewerProgId(mdzProgId) || IsMdViewerExecutable(mdzExecutable))) {
         if (!effectiveProgId.empty()) WriteProgId(effectiveProgId, executablePath);
+        if (!mdzProgId.empty() && mdzProgId != effectiveProgId) {
+            WriteProgId(mdzProgId, executablePath);
+        }
         NotifyAssociationChanged();
         return FileAssociationState::RepairedMdViewer;
     }
@@ -211,7 +232,7 @@ FileAssociationResult AssociateMarkdownFiles(
     FileAssociationResult result;
     result.success = WriteProgId(kCanonicalProgId, executablePath);
     result.success = WriteApplicationRegistration(executablePath) && result.success;
-    for (const wchar_t* extension : {L".md", L".markdown"}) {
+    for (const wchar_t* extension : {L".md", L".markdown", L".mdz"}) {
         const std::wstring extensionRoot = std::wstring(kClassesRoot) + extension;
         result.success = SetString(HKEY_CURRENT_USER, extensionRoot,
                                    nullptr, kCanonicalProgId) && result.success;

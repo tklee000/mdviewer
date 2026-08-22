@@ -249,6 +249,181 @@ try {
     messages: [{ type: "files.dropped" }]
   }, "Explorer file drop is accepted by the editor stage and forwarded once");
 
+  const recentDocuments = await evaluate(`(() => {
+    const documents = Array.from({ length: 12 }, (_, index) => ({
+      kind: index % 2 ? 'local' : 'googleDrive',
+      location: index % 2 ? 'C:\\\\docs\\\\recent-' + index + '.md' : 'drive-' + index,
+      name: 'recent-' + index + '.md',
+      lastOpened: 1000 - index
+    }));
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'recent.changed', documents }
+    }));
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('#recent-documents-menu button').click();
+    document.querySelector('[data-menu-command="file.openGoogleDrive"]').click();
+    window.mdViewerNative = originalBridge;
+    const buttons = [...document.querySelectorAll('#recent-documents-menu button')];
+    return {
+      count: buttons.length,
+      driveMarks: document.querySelectorAll('#recent-documents-menu .google-drive-mark').length,
+      firstTitle: buttons[0].title,
+      messages
+    };
+  })()`);
+  assert.deepEqual(recentDocuments, {
+    count: 10,
+    driveMarks: 5,
+    firstTitle: "Google Drive: recent-0.md",
+    messages: [
+      { type: "recent.open", kind: "googleDrive", location: "drive-0" },
+      { type: "command", name: "file.openGoogleDrive" }
+    ]
+  }, "recent menu limits entries, marks Drive files, and routes both commands");
+
+  const driveSaveAs = await evaluate(`(() => {
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.saveGoogleDriveAs"]').click();
+    const dialog = document.querySelector('#google-drive-save-dialog');
+    const opened = dialog.open;
+    document.querySelector('#google-drive-file-name').value = 'new-cloud-note';
+    document.querySelector('#google-drive-choose-folder').checked = false;
+    document.querySelector('#google-drive-save-form').requestSubmit();
+    window.mdViewerNative = originalBridge;
+    return { opened, closed: !dialog.open, messages };
+  })()`);
+  assert.deepEqual(driveSaveAs, {
+    opened: true,
+    closed: true,
+    messages: [{
+      type: "command", name: "file.saveGoogleDriveAs",
+      fileName: "new-cloud-note.md", chooseFolder: false
+    }]
+  }, "Drive Save As collects a Markdown name and routes the root upload command");
+
+  assert.deepEqual(await evaluate(`(() => {
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.saveGoogleDriveAs"]').click();
+    const dialog = document.querySelector('#google-drive-save-dialog');
+    const input = document.querySelector('#google-drive-file-name');
+    input.value = 'wrong-extension.txt';
+    document.querySelector('#google-drive-save-form').requestSubmit();
+    const result = { open: dialog.open, invalid: !input.checkValidity(), messages };
+    dialog.close('test');
+    window.mdViewerNative = originalBridge;
+    return result;
+  })()`), { open: true, invalid: true, messages: [] },
+  "Drive Save As rejects non-Markdown file names before native upload");
+
+  assert.deepEqual(await evaluate(`(() => {
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-file-menu-root] > .menu-trigger').click();
+    window.mdViewerNative = originalBridge;
+    return messages;
+  })()`), [{ type: "recent.refresh" }],
+  "opening File refreshes recents shared by other MdViewer windows");
+
+  const driveDocumentChrome = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.opened', mode: 'preview', document: {
+        origin: 'googleDrive', path: '', name: 'cloud-note.md', text: '# Cloud',
+        dirty: false, encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    await new Promise(requestAnimationFrame);
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'googleDrive.busy', busy: true }
+    }));
+    const result = {
+      title: document.querySelector('#document-name').textContent,
+      status: document.querySelector('#save-status').textContent
+    };
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'googleDrive.busy', busy: false }
+    }));
+    return result;
+  })()`);
+  assert.deepEqual(driveDocumentChrome,
+    { title: "cloud-note.md", status: "Working with Google Drive…" },
+    "Drive documents keep their cloud name and expose operation progress");
+
+  const driveSaveToast = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.saved', document: {
+        origin: 'googleDrive', path: '', name: 'cloud-note.md',
+        encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const toast = document.querySelector('#toast-region .toast-notification');
+    const shown = {
+      tone: toast?.classList.contains('success') || false,
+      role: toast?.getAttribute('role') || '',
+      message: toast?.querySelector('.toast-message')?.textContent || ''
+    };
+    await new Promise(resolve => setTimeout(resolve, 3100));
+    return {
+      shown,
+      dismissed: !document.querySelector('#toast-region .toast-notification')
+    };
+  })()`);
+  assert.deepEqual(driveSaveToast, {
+    shown: {
+      tone: true,
+      role: "status",
+      message: "Saved to Google Drive: cloud-note.md"
+    },
+    dismissed: true
+  }, "Drive save confirmation appears as a non-blocking auto-dismiss notification");
+
+  assert.deepEqual(await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'native.toast', title: 'File save error',
+      message: 'The document could not be saved.', tone: 'error'
+    } }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const toast = document.querySelector('#toast-region .toast-notification');
+    const result = {
+      tone: toast?.classList.contains('error') || false,
+      role: toast?.getAttribute('role') || '',
+      icon: toast?.querySelector('.toast-icon')?.textContent || '',
+      title: toast?.querySelector('.toast-title')?.textContent || '',
+      message: toast?.querySelector('.toast-message')?.textContent || ''
+    };
+    document.querySelector('#toast-region').replaceChildren();
+    return result;
+  })()`), {
+    tone: true,
+    role: "alert",
+    icon: "×",
+    title: "File save error",
+    message: "The document could not be saved."
+  }, "native information, warning, and error messages use the common notification surface");
+
+  assert.deepEqual(await evaluate(`(() => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.savedSnapshot',
+      document: {
+        origin: 'googleDrive', path: '', name: 'cloud-copy.md', dirty: true,
+        encoding: 'UTF-8', eol: 'LF'
+      },
+      savedText: '# Earlier cloud revision', savedEol: 'LF'
+    } }));
+    return {
+      title: document.querySelector('#document-name').textContent,
+      dirty: !document.querySelector('#dirty-indicator').hidden
+    };
+  })()`), { title: "cloud-copy.md", dirty: true },
+  "Drive Save As can relocate a document while preserving newer dirty edits");
+
   await click("#mode-toggle-button");
   assert.equal(await evaluate("!document.querySelector('#status-mode-menu').hidden"), true,
     "bottom-left mode button opens the view menu");
@@ -430,6 +605,45 @@ try {
   assert.equal(await sourceValue(), "", "image undo");
   await click('[data-editor-command="redo"]');
   assert.equal(await sourceValue(), "![cat](images/cat.png)", "image redo");
+
+  const mdzImageRequest = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.opened', mode: 'source', document: {
+        origin: 'local', format: 'mdz', path: 'C:\\\\docs\\\\bundle.mdz',
+        name: 'bundle.mdz', text: '', dirty: false, encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-format="image"]').click();
+    document.querySelector('#image-alt-input').value = 'packed';
+    document.querySelector('#image-source-input').value =
+      'data:image/png;base64,iVBORw0KGgo=';
+    document.querySelector('#image-dialog-form').requestSubmit();
+    await new Promise(requestAnimationFrame);
+    window.mdViewerNative = originalBridge;
+    return {
+      messages,
+      source: document.querySelector('#source-editor').value,
+      encoding: document.querySelector('#encoding-status').textContent
+    };
+  })()`);
+  assert.equal(mdzImageRequest.messages.length, 1, "MDZ image sends one native package request");
+  assert.equal(mdzImageRequest.messages[0].type, "image.embed", "MDZ image uses native package bridge");
+  assert.equal(mdzImageRequest.messages[0].fileName, "image", "manual MDZ data image receives a safe name");
+  assert.equal(mdzImageRequest.source, "", "MDZ image link waits for native package success");
+  assert.equal(mdzImageRequest.encoding, "MDZ · UTF-8", "status bar identifies MDZ mode");
+  await evaluate(`window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+    type: 'image.embedded', path: 'images/image.png', alt: 'packed'
+  } }))`);
+  assert.equal(await sourceValue(), "![packed](images/image.png)",
+    "MDZ package success inserts the archive-relative image link");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await sourceValue(), "", "MDZ image link undo restores the initial source");
+  await click('[data-editor-command="redo"]');
+  assert.equal(await sourceValue(), "![packed](images/image.png)",
+    "MDZ image link redo restores the packaged image reference");
 
   await setSource("");
   await click('#table-size-grid [data-table-columns="3"][data-table-rows="2"]');
@@ -904,7 +1118,7 @@ try {
     `${randomHistoryRounds} rounds, ${totalRandomOperations} operations, ` +
     `${totalRandomUndos} undo steps.`);
 
-  console.log("MdViewer toolbar smoke tests passed.");
+  console.log("MdViewer UI smoke and randomized regression tests passed.");
 } finally {
   try {
     await Promise.race([send("Browser.close").catch(() => undefined), delay(1000)]);

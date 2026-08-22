@@ -1,0 +1,10 @@
+MdViewer implements the MDZip (.mdz) Specification v1.1.0.
+
+Specification: https://github.com/mdzip-project/mdzip-spec
+Project: https://mdzip.org/
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License URL: https://creativecommons.org/licenses/by/4.0/
+
+MdViewer is an independent native implementation. It uses its own MDZip
+container integration together with the user-owned minicell/libzip DEFLATE
+code; it does not incorporate an MDZip reference implementation.

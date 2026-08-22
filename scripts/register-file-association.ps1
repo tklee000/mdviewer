@@ -25,7 +25,7 @@ New-Item -Path (Join-Path $progIdPath "shell\open\command") -Force | Out-Null
 Set-Item -LiteralPath (Join-Path $progIdPath "shell\open\command") `
     -Value ('"{0}" "%1"' -f $resolvedExecutable)
 
-foreach ($extension in ".md", ".markdown") {
+foreach ($extension in ".md", ".markdown", ".mdz") {
     $extensionPath = Join-Path $classesRoot $extension
     New-Item -Path $extensionPath -Force | Out-Null
     Set-Item -LiteralPath $extensionPath -Value $progId
@@ -35,5 +35,5 @@ foreach ($extension in ".md", ".markdown") {
         -Value "" -Force | Out-Null
 }
 
-Write-Host "Registered MdViewer for .md and .markdown files for the current user."
+Write-Host "Registered MdViewer for .md, .markdown, and .mdz files for the current user."
 Write-Host "Windows may require confirmation under Settings > Default apps."

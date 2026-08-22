@@ -24,7 +24,7 @@ ChangesAssociations=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
-Name: "fileassoc"; Description: "Open .md and .markdown files with MdViewer"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "fileassoc"; Description: "Open .md, .markdown, and .mdz files with MdViewer"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Files]
 Source: "..\..\x64\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -41,6 +41,8 @@ Root: HKCU; Subkey: "Software\Classes\.md"; ValueType: string; ValueData: "MdVie
 Root: HKCU; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "MdViewer.Markdown"; ValueData: ""; Tasks: fileassoc
 Root: HKCU; Subkey: "Software\Classes\.markdown"; ValueType: string; ValueData: "MdViewer.Markdown"; Flags: uninsdeletevalue; Tasks: fileassoc
 Root: HKCU; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: string; ValueName: "MdViewer.Markdown"; ValueData: ""; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\.mdz"; ValueType: string; ValueData: "MdViewer.Markdown"; Flags: uninsdeletevalue; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\.mdz\OpenWithProgids"; ValueType: string; ValueName: "MdViewer.Markdown"; ValueData: ""; Tasks: fileassoc
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent

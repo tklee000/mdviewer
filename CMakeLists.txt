@@ -42,10 +42,38 @@ set(MDVIEWER_SOURCES
   src/Config.h
   src/FileAssociation.cpp
   src/FileAssociation.h
+  src/GoogleDriveClient.cpp
+  src/GoogleDriveClient.h
   src/Json.cpp
   src/Json.h
   src/Localization.cpp
   src/Localization.h
+  src/MdzArchive.cpp
+  src/MdzArchive.h
+  src/mdz_zip/common.h
+  src/mdz_zip/crc32.cpp
+  src/mdz_zip/crc32.h
+  src/mdz_zip/deflate_decoder.cpp
+  src/mdz_zip/deflate_decoder.h
+  src/mdz_zip/deflate_encoder.cpp
+  src/mdz_zip/deflate_encoder.h
+  src/mdz_zip/match.h
+  src/mdz_zip/match_avx2.cpp
+  src/mdz_zip/match_scalar.cpp
+  src/mdz_zip/mzip_codec.cpp
+  src/mdz_zip/platform.cpp
+  src/mdz_zip/platform.h
+  src/mdz_zip/thread_pool.cpp
+  src/mdz_zip/thread_pool.h
+  src/mdz_zip/mzip_codec.h
+  src/mdz_zip/aes256_aesni.cpp
+  src/mdz_zip/aes256_aesni.h
+  src/mdz_zip/crypto.cpp
+  src/mdz_zip/crypto.h
+  src/mdz_zip/zip_archive.cpp
+  src/mdz_zip/zip_archive.h
+  src/RecentDocuments.cpp
+  src/RecentDocuments.h
   src/UiResourceProvider.h
   src/UiResourceProviderWin.cpp
   src/app.rc
@@ -76,7 +104,9 @@ set_property(SOURCE src/app.rc APPEND PROPERTY OBJECT_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/assets/MdViewer.ico")
 
 add_executable(MdViewer WIN32 ${MDVIEWER_SOURCES} ${MDVIEWER_UI_FILES})
-target_include_directories(MdViewer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CEF_ROOT}")
+target_include_directories(MdViewer PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${CEF_ROOT}")
 target_compile_features(MdViewer PRIVATE cxx_std_20)
 target_compile_definitions(MdViewer PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
@@ -88,10 +118,13 @@ target_link_options(MdViewer PRIVATE
   /MANIFEST:NO /LARGEADDRESSAWARE /STACK:0x800000)
 target_link_libraries(MdViewer PRIVATE
   libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS}
-  Advapi32.lib Comdlg32.lib Dwmapi.lib Ole32.lib Shell32.lib)
+  Advapi32.lib Bcrypt.lib Comdlg32.lib Crypt32.lib Dwmapi.lib Ole32.lib
+  Shell32.lib Winhttp.lib Ws2_32.lib)
 add_dependencies(MdViewer libcef_dll_wrapper)
 
-set(MDVIEWER_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/x64/$<CONFIG>")
+if(NOT DEFINED MDVIEWER_OUTPUT_DIR)
+  set(MDVIEWER_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/x64/$<CONFIG>")
+endif()
 set_target_properties(MdViewer PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${MDVIEWER_OUTPUT_DIR}"
   VS_DEBUGGER_ENVIRONMENT
@@ -124,7 +157,55 @@ add_custom_command(TARGET MdViewer POST_BUILD
           "${CEF_ROOT}/CREDITS.html" "${MDVIEWER_OUTPUT_DIR}/licenses/cef/CREDITS.html"
   VERBATIM)
 
+add_custom_command(TARGET MdViewer POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "${MDVIEWER_OUTPUT_DIR}/licenses/mdzip-spec"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/licenses/mdzip-spec/NOTICE.txt"
+          "${MDVIEWER_OUTPUT_DIR}/licenses/mdzip-spec/NOTICE.txt"
+  VERBATIM)
+
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "src" FILES ${MDVIEWER_SOURCES})
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/web" PREFIX "web" FILES ${MDVIEWER_UI_FILES})
 
 PRINT_CEF_CONFIG()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(MdViewerCoreTests
+    tests/core-smoke.cpp
+    src/GoogleDriveClient.cpp
+    src/GoogleDriveClient.h
+    src/Json.cpp
+    src/Json.h
+    src/MdzArchive.cpp
+    src/MdzArchive.h
+    src/mdz_zip/common.h
+    src/mdz_zip/crc32.cpp
+    src/mdz_zip/crc32.h
+    src/mdz_zip/deflate_decoder.cpp
+    src/mdz_zip/deflate_decoder.h
+    src/mdz_zip/deflate_encoder.cpp
+    src/mdz_zip/deflate_encoder.h
+    src/mdz_zip/match.h
+    src/mdz_zip/match_avx2.cpp
+    src/mdz_zip/match_scalar.cpp
+    src/mdz_zip/mzip_codec.cpp
+    src/mdz_zip/platform.cpp
+    src/mdz_zip/platform.h
+    src/mdz_zip/thread_pool.cpp
+    src/mdz_zip/thread_pool.h
+    src/mdz_zip/mzip_codec.h
+    src/RecentDocuments.cpp
+    src/RecentDocuments.h)
+  target_include_directories(MdViewerCoreTests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_compile_features(MdViewerCoreTests PRIVATE cxx_std_20)
+  target_compile_definitions(MdViewerCoreTests PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    WINVER=0x0A00 _WIN32_WINNT=0x0A00 NTDDI_VERSION=NTDDI_WIN10_FE)
+  target_compile_options(MdViewerCoreTests PRIVATE /utf-8 /W4 /EHsc)
+  target_link_libraries(MdViewerCoreTests PRIVATE
+    Advapi32.lib Bcrypt.lib Crypt32.lib Shell32.lib Winhttp.lib Ws2_32.lib)
+  add_test(NAME MdViewerCoreTests COMMAND MdViewerCoreTests)
+endif()

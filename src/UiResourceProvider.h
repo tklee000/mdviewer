@@ -1,5 +1,7 @@
 #pragma once
 
+#include "MdzArchive.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +19,9 @@ public:
     virtual ~UiResourceProvider() = default;
     virtual UiResource Load(const std::string& url) const = 0;
     virtual void SetDocumentDirectory(const std::wstring& directory) = 0;
+    virtual void SetDocumentArchive(
+        std::shared_ptr<const mdz::Entries> entries,
+        const std::string& entryPoint) = 0;
 };
 
 std::shared_ptr<UiResourceProvider> CreatePlatformUiResourceProvider(

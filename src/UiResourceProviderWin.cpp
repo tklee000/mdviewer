@@ -19,6 +19,8 @@ namespace {
 
 constexpr std::string_view kUiOrigin = "https://app.mdviewer/";
 constexpr std::string_view kAssetPrefix = "https://app.mdviewer/__asset?path=";
+constexpr std::string_view kPdfPreviewPrefix =
+    "https://app.mdviewer/__pdf-preview";
 constexpr wchar_t kDevelopmentUiEnvironment[] = L"MDVIEWER_DEVELOPMENT_UI";
 
 struct ResourceDescriptor {
@@ -178,6 +180,9 @@ public:
         if (url.compare(0, kAssetPrefix.size(), kAssetPrefix) == 0) {
             return LoadDocumentAsset(url);
         }
+        if (url.compare(0, kPdfPreviewPrefix.size(), kPdfPreviewPrefix) == 0) {
+            return LoadPdfPreview();
+        }
 
         UiResource result;
         if (url.compare(0, kUiOrigin.size(), kUiOrigin) != 0) return result;
@@ -229,7 +234,29 @@ public:
         archiveEntryPoint_ = entryPoint;
     }
 
+    void SetPdfPreview(
+        std::shared_ptr<const std::vector<unsigned char>> bytes) override {
+        std::lock_guard<std::mutex> lock(pdfPreviewMutex_);
+        pdfPreview_ = std::move(bytes);
+    }
+
 private:
+    UiResource LoadPdfPreview() const {
+        UiResource result;
+        std::shared_ptr<const std::vector<unsigned char>> bytes;
+        {
+            std::lock_guard<std::mutex> lock(pdfPreviewMutex_);
+            bytes = pdfPreview_;
+        }
+        if (!bytes || bytes->empty()) return result;
+        result.statusCode = 200;
+        result.statusText = "OK";
+        result.mimeType = "application/pdf";
+        result.charset.clear();
+        result.bytes = *bytes;
+        return result;
+    }
+
     UiResource LoadDocumentAsset(const std::string& url) const {
         UiResource result;
         const auto decoded = PercentDecode(
@@ -288,6 +315,8 @@ private:
     std::filesystem::path documentDirectory_;
     std::shared_ptr<const mdz::Entries> documentArchive_;
     std::string archiveEntryPoint_;
+    mutable std::mutex pdfPreviewMutex_;
+    std::shared_ptr<const std::vector<unsigned char>> pdfPreview_;
 };
 
 }  // namespace

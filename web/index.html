@@ -49,6 +49,9 @@
               <span data-i18n="Save to Google Drive As…">Save to Google Drive As…</span>
             </button>
             <div class="menu-separator" role="separator"></div>
+            <button type="button" role="menuitem" data-menu-command="file.exportPdf"
+                    data-i18n="Export to &amp;PDF...	Ctrl+P">Export to &amp;PDF...	Ctrl+P</button>
+            <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="app.exit" data-i18n="E&amp;xit">E&amp;xit</button>
           </div>
         </div>
@@ -411,6 +414,78 @@
         <button class="primary" type="submit" data-i18n="Save to Drive">Save to Drive</button>
       </footer>
     </form>
+  </dialog>
+  <dialog id="pdf-export-dialog" class="settings-dialog pdf-export-dialog"
+          aria-labelledby="pdf-export-dialog-title">
+    <div class="pdf-export-shell">
+      <header class="settings-dialog-header">
+        <div>
+          <h2 id="pdf-export-dialog-title" data-i18n="Export PDF">Export PDF</h2>
+          <p data-i18n="Review the final pages before saving.">Review the final pages before saving.</p>
+        </div>
+        <button class="dialog-close-button" type="button" data-pdf-export-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+
+      <div class="pdf-export-content">
+        <aside class="pdf-export-settings" aria-label="PDF settings"
+               data-i18n-aria-label="PDF settings">
+          <label class="dialog-field">
+            <span data-i18n="Paper size">Paper size</span>
+            <select id="pdf-paper-select">
+              <option value="a4">A4 (210 × 297 mm)</option>
+              <option value="letter">Letter (8.5 × 11 in)</option>
+            </select>
+          </label>
+          <fieldset class="pdf-choice-group">
+            <legend data-i18n="Orientation">Orientation</legend>
+            <label><input type="radio" name="pdf-orientation" value="portrait" checked>
+              <span data-i18n="Portrait">Portrait</span></label>
+            <label><input type="radio" name="pdf-orientation" value="landscape">
+              <span data-i18n="Landscape">Landscape</span></label>
+          </fieldset>
+          <label class="dialog-field">
+            <span data-i18n="Margins">Margins</span>
+            <select id="pdf-margin-select">
+              <option value="20" data-i18n="Normal (20 mm)">Normal (20 mm)</option>
+              <option value="10" data-i18n="Narrow (10 mm)">Narrow (10 mm)</option>
+              <option value="0" data-i18n="None">None</option>
+            </select>
+          </label>
+          <label class="dialog-check-field">
+            <input id="pdf-page-numbers" type="checkbox">
+            <span data-i18n="Show page numbers">Show page numbers</span>
+          </label>
+          <label class="dialog-check-field">
+            <input id="pdf-print-background" type="checkbox" checked>
+            <span data-i18n="Print backgrounds">Print backgrounds</span>
+          </label>
+          <p id="pdf-paper-summary" class="pdf-paper-summary"></p>
+        </aside>
+
+        <section class="pdf-preview-panel" aria-label="Print preview"
+                 data-i18n-aria-label="Print preview">
+          <div id="pdf-preview-loading" class="pdf-preview-message" role="status">
+            <span class="pdf-preview-spinner" aria-hidden="true"></span>
+            <strong data-i18n="Creating print preview…">Creating print preview…</strong>
+            <span data-i18n="Images and fonts are prepared before pagination.">Images and fonts are prepared before pagination.</span>
+          </div>
+          <div id="pdf-preview-error" class="pdf-preview-message" role="alert" hidden>
+            <strong data-i18n="Print preview could not be created.">Print preview could not be created.</strong>
+            <button id="pdf-preview-retry" type="button" data-i18n="Try again">Try again</button>
+          </div>
+          <iframe id="pdf-preview-frame" title="Print preview"
+                  data-i18n-title="Print preview" hidden></iframe>
+        </section>
+      </div>
+
+      <footer class="settings-dialog-actions pdf-export-actions">
+        <span id="pdf-export-status" role="status"></span>
+        <button type="button" data-pdf-export-cancel data-i18n="Cancel">Cancel</button>
+        <button id="pdf-export-save" class="primary" type="button" disabled
+                data-i18n="Save PDF">Save PDF</button>
+      </footer>
+    </div>
   </dialog>
   <script src="i18n.js"></script>
   <script src="app.js"></script>

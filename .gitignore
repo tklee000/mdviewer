@@ -4,6 +4,8 @@
 /x64/
 /deploy/
 /build/
+/output/
+/tmp/
 /packages/
 /cmake-build-*/
 CMakeCache.txt

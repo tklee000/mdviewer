@@ -17,6 +17,8 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 - CMake-generated Visual Studio solution
 - CEF 151 minimal runtime, downloaded and checksum verified by `build.ps1`
 - Open, edit, save, Save As, and command-line file opening for Markdown and MDZip
+- Exact PDF export with in-app A4/Letter print preview, orientation, margins,
+  backgrounds, optional page numbers, and atomic Save As
 - System-browser Google Drive Picker opening with direct save-back and conflict detection
 - A unified ten-item recent-document menu for local and Google Drive files
 - Single-instance forwarding when another Markdown file is double-clicked
@@ -195,5 +197,6 @@ with the initial document.
 node .\tests\ui-smoke.mjs
 node .\tests\native-open-smoke.mjs
 node .\tests\native-mdz-smoke.mjs
+node .\tests\native-pdf-smoke.mjs
 .\out\build\Release\MdViewerCoreTests.exe
 ```

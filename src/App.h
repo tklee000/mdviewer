@@ -48,6 +48,9 @@ public:
     void OnBrowserMessage(const std::string& message) override;
     void OnFilesDropped(const std::vector<std::wstring>& paths) override;
     void OnBrowserLoadError(const std::wstring& message) override;
+    void OnPdfPrintFinished(std::uint64_t requestId,
+                            const std::wstring& path,
+                            bool success) override;
 
 private:
     enum class DocumentOrigin {
@@ -83,6 +86,11 @@ private:
         std::wstring path;
         TextEncoding encoding = TextEncoding::Utf8;
         DocumentFormat format = DocumentFormat::Markdown;
+    };
+
+    struct PdfPreviewRequest {
+        std::uint64_t requestId = 0;
+        PdfPrintSettings settings;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message,
@@ -149,6 +157,17 @@ private:
     bool SaveDocument();
     bool SaveDocumentAs();
     bool WriteDocument(const std::wstring& path, std::wstring* errorMessage);
+    void QueuePdfPreview(PdfPreviewRequest request);
+    void StartPdfPreview(PdfPreviewRequest request);
+    void FinishPdfPreview(std::uint64_t requestId,
+                          const std::wstring& path,
+                          bool success);
+    void ClosePdfPreview();
+    void SavePdfPreview(std::uint64_t requestId);
+    std::wstring ChoosePdfFileToSave() const;
+    bool WritePdfFile(const std::wstring& path,
+                      const std::vector<unsigned char>& bytes,
+                      std::wstring* errorMessage) const;
     std::wstring ChooseFileToOpen() const;
     std::optional<SaveSelection> ChooseFileToSave() const;
     void CheckExternalFileChange();
@@ -187,4 +206,10 @@ private:
     std::jthread googleDriveWorker_;
     bool googleDriveSaveInProgress_ = false;
     std::function<void()> pendingGoogleDriveSaveContinuation_;
+    bool pdfPreviewOpen_ = false;
+    bool pdfPrintInProgress_ = false;
+    std::uint64_t pdfPreviewRequestId_ = 0;
+    std::optional<PdfPreviewRequest> pendingPdfPreviewRequest_;
+    std::shared_ptr<const std::vector<unsigned char>> pdfPreviewBytes_;
+    std::wstring pdfPreviewTemporaryPath_;
 };

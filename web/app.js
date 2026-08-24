@@ -75,6 +75,9 @@
   let recentDocumentItems = [];
   let toastHideTimer = 0;
   let toastRemoveTimer = 0;
+  let pdfPreviewTimer = 0;
+  let pdfPreviewSequence = 0;
+  let activePdfPreviewRequest = 0;
   const splitMinimumWidth = 860;
 
   function activeEditorMode() {
@@ -191,6 +194,148 @@
     state.previewFont = previewFont;
     state.previewFontSize = previewFontSize;
     applyEditorPreferences();
+  }
+
+  function readStoredPdfSettings() {
+    const defaults = {
+      paper: "a4", orientation: "portrait", marginMm: 20,
+      pageNumbers: false, printBackground: true
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem("mdviewer.pdfSettings") || "null");
+      if (!stored || typeof stored !== "object") return defaults;
+      return {
+        paper: ["a4", "letter"].includes(stored.paper) ? stored.paper : defaults.paper,
+        orientation: ["portrait", "landscape"].includes(stored.orientation)
+          ? stored.orientation : defaults.orientation,
+        marginMm: [0, 10, 20].includes(Number(stored.marginMm))
+          ? Number(stored.marginMm) : defaults.marginMm,
+        pageNumbers: Boolean(stored.pageNumbers),
+        printBackground: stored.printBackground !== false
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function pdfSettingsFromControls() {
+    return {
+      paper: ["a4", "letter"].includes($("#pdf-paper-select").value)
+        ? $("#pdf-paper-select").value : "a4",
+      orientation: $('input[name="pdf-orientation"]:checked')?.value === "landscape"
+        ? "landscape" : "portrait",
+      marginMm: [0, 10, 20].includes(Number($("#pdf-margin-select").value))
+        ? Number($("#pdf-margin-select").value) : 20,
+      pageNumbers: $("#pdf-page-numbers").checked,
+      printBackground: $("#pdf-print-background").checked
+    };
+  }
+
+  function applyPdfSettingsToControls(settings) {
+    $("#pdf-paper-select").value = settings.paper;
+    const orientation = $(`input[name="pdf-orientation"][value="${settings.orientation}"]`);
+    if (orientation) orientation.checked = true;
+    $("#pdf-margin-select").value = String(settings.marginMm);
+    $("#pdf-page-numbers").checked = settings.pageNumbers;
+    $("#pdf-print-background").checked = settings.printBackground;
+    updatePdfPaperSummary();
+  }
+
+  function updatePdfPaperSummary() {
+    const settings = pdfSettingsFromControls();
+    const paper = settings.paper === "letter" ? "Letter" : "A4";
+    const orientation = i18n.t(settings.orientation === "landscape"
+      ? "Landscape" : "Portrait");
+    $("#pdf-paper-summary").textContent = i18n.t(
+      "{paper} · {orientation} · {margin} mm margins",
+      { paper, orientation, margin: settings.marginMm });
+  }
+
+  function synchronizeDocumentForPdf() {
+    if (activeEditorMode() === "source") {
+      state.text = sourceEditor.value;
+      renderPreview();
+    } else if (state.previewChanged) {
+      state.text = previewToMarkdown();
+      sourceEditor.value = state.text;
+      updateSourceHighlight();
+    }
+  }
+
+  async function waitForPdfResources() {
+    const waits = [];
+    if (document.fonts?.ready) waits.push(document.fonts.ready.catch(() => {}));
+    previewEditor.querySelectorAll("img").forEach((image) => {
+      if (image.complete) return;
+      waits.push(image.decode?.().catch(() => {}) ||
+        new Promise((resolveImage) => {
+          image.addEventListener("load", resolveImage, { once: true });
+          image.addEventListener("error", resolveImage, { once: true });
+        }));
+    });
+    await Promise.race([
+      Promise.all(waits),
+      new Promise((resolveTimeout) => setTimeout(resolveTimeout, 3000))
+    ]);
+    await new Promise((resolveFrame) => requestAnimationFrame(() =>
+      requestAnimationFrame(resolveFrame)));
+  }
+
+  function showPdfPreviewState(kind) {
+    $("#pdf-preview-loading").hidden = kind !== "loading";
+    $("#pdf-preview-error").hidden = kind !== "error";
+    $("#pdf-preview-frame").hidden = kind !== "ready";
+    $("#pdf-export-save").disabled = kind !== "ready";
+    $("#pdf-export-status").textContent = i18n.t(
+      kind === "ready" ? "Preview ready" :
+      kind === "error" ? "Preview unavailable" : "Creating print preview…");
+  }
+
+  async function requestPdfPreview() {
+    const dialog = $("#pdf-export-dialog");
+    if (!dialog.open) return;
+    const requestId = ++pdfPreviewSequence;
+    activePdfPreviewRequest = requestId;
+    const settings = pdfSettingsFromControls();
+    localStorage.setItem("mdviewer.pdfSettings", JSON.stringify(settings));
+    document.documentElement.style.setProperty(
+      "--pdf-page-margin", `${settings.marginMm}mm`);
+    document.documentElement.style.setProperty(
+      "--pdf-page-bottom-margin",
+      `${settings.pageNumbers ? Math.max(10, settings.marginMm) : settings.marginMm}mm`);
+    updatePdfPaperSummary();
+    showPdfPreviewState("loading");
+    synchronizeDocumentForPdf();
+    document.title = state.name || "MdViewer";
+    await waitForPdfResources();
+    if (!dialog.open || requestId !== activePdfPreviewRequest) return;
+    if (!post("pdf.preview", { requestId, ...settings })) {
+      showPdfPreviewState("error");
+    }
+  }
+
+  function schedulePdfPreview(delay = 220) {
+    clearTimeout(pdfPreviewTimer);
+    pdfPreviewTimer = setTimeout(() => requestPdfPreview(), delay);
+  }
+
+  function openPdfExportDialog() {
+    const dialog = $("#pdf-export-dialog");
+    if (dialog.open) return;
+    applyPdfSettingsToControls(readStoredPdfSettings());
+    $("#pdf-preview-frame").removeAttribute("src");
+    dialog.showModal();
+    schedulePdfPreview(0);
+  }
+
+  function closePdfExportDialog() {
+    const dialog = $("#pdf-export-dialog");
+    if (!dialog.open) return;
+    clearTimeout(pdfPreviewTimer);
+    activePdfPreviewRequest = ++pdfPreviewSequence;
+    $("#pdf-preview-frame").removeAttribute("src");
+    dialog.close("cancel");
+    post("pdf.previewClose");
   }
 
   function sourceHeadingLevel() {
@@ -1724,7 +1869,9 @@
   }
 
   function executeMenuCommand(name) {
-    if (name === "file.saveGoogleDriveAs") {
+    if (name === "file.exportPdf") {
+      openPdfExportDialog();
+    } else if (name === "file.saveGoogleDriveAs") {
       openGoogleDriveSaveDialog();
     } else if (name.startsWith("file.") || name.startsWith("app.")) {
       post("command", { name });
@@ -1950,6 +2097,33 @@
       if (event.target === googleDriveSaveDialog) googleDriveSaveDialog.close("cancel");
     });
 
+    const pdfExportDialog = $("#pdf-export-dialog");
+    [$("#pdf-paper-select"), $("#pdf-margin-select"),
+      $("#pdf-page-numbers"), $("#pdf-print-background"),
+      ...$$('input[name="pdf-orientation"]')]
+      .forEach((control) => control.addEventListener("change", () => {
+        updatePdfPaperSummary();
+        schedulePdfPreview();
+      }));
+    $$('[data-pdf-export-cancel]').forEach((button) =>
+      button.addEventListener("click", closePdfExportDialog));
+    pdfExportDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closePdfExportDialog();
+    });
+    pdfExportDialog.addEventListener("click", (event) => {
+      if (event.target === pdfExportDialog) closePdfExportDialog();
+    });
+    $("#pdf-preview-retry").addEventListener("click", () => schedulePdfPreview(0));
+    $("#pdf-export-save").addEventListener("click", () => {
+      if (!activePdfPreviewRequest) return;
+      $("#pdf-export-save").disabled = true;
+      $("#pdf-export-status").textContent = i18n.t("Saving PDF…");
+      if (!post("pdf.save", { requestId: activePdfPreviewRequest })) {
+        showPdfPreviewState("error");
+      }
+    });
+
     $("#table-size-grid").addEventListener("pointerover", (event) => {
       const cell = event.target.closest("button[data-table-columns]");
       if (cell) updateTableGridSelection(Number(cell.dataset.tableColumns), Number(cell.dataset.tableRows));
@@ -2137,6 +2311,9 @@
       } else if (key === "s") {
         event.preventDefault();
         post("command", { name: event.shiftKey ? "file.saveAs" : "file.save" });
+      } else if (key === "p") {
+        event.preventDefault();
+        openPdfExportDialog();
       } else if (key === "o") {
         event.preventDefault(); post("command", { name: "file.open" });
       } else if (key === "n") {
@@ -2194,6 +2371,26 @@
       } else if (message.type === "googleDrive.savedOlderRevision") {
         $("#save-status").textContent = i18n.t("Drive saved; newer local changes remain");
         showToast(i18n.t("Drive saved; newer local changes remain"), "warning");
+      } else if (message.type === "pdf.previewReady") {
+        if ($("#pdf-export-dialog").open &&
+            Number(message.requestId) === activePdfPreviewRequest) {
+          $("#pdf-preview-frame").src = `${message.url}#toolbar=0&navpanes=0`;
+          showPdfPreviewState("ready");
+        }
+      } else if (message.type === "pdf.previewFailed") {
+        if ($("#pdf-export-dialog").open &&
+            Number(message.requestId) === activePdfPreviewRequest) {
+          showPdfPreviewState("error");
+        }
+      } else if (message.type === "pdf.saved") {
+        const path = message.path || "";
+        closePdfExportDialog();
+        showToast(i18n.t("PDF saved to {path}", { path }), "success");
+      } else if (message.type === "pdf.saveCanceled") {
+        showPdfPreviewState("ready");
+      } else if (message.type === "pdf.saveFailed") {
+        $("#pdf-export-save").disabled = false;
+        $("#pdf-export-status").textContent = i18n.t("PDF could not be saved");
       } else if (message.type === "native.toast") {
         showToast(message.message || "", message.tone || "info", message.title || "");
       } else if (message.type === "image.embedded") {
@@ -2223,6 +2420,7 @@
     window.addEventListener("mdviewerlanguageapplied", () => {
       updateChrome();
       populateRecentDocuments();
+      updatePdfPaperSummary();
     });
     window.addEventListener("resize", () => {
       if (state.mode === "split" && innerWidth < splitMinimumWidth) setMode(activeEditorMode());

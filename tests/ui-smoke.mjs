@@ -331,6 +331,58 @@ try {
   })()`), [{ type: "recent.refresh" }],
   "opening File refreshes recents shared by other MdViewer windows");
 
+  const pdfExport = await evaluate(`(async () => {
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.exportPdf"]').click();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const dialog = document.querySelector('#pdf-export-dialog');
+    const opened = dialog.open;
+    document.querySelector('#pdf-paper-select').value = 'letter';
+    document.querySelector('#pdf-paper-select').dispatchEvent(new Event('change', { bubbles: true }));
+    const landscape = document.querySelector('input[name="pdf-orientation"][value="landscape"]');
+    landscape.checked = true;
+    landscape.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#pdf-margin-select').value = '10';
+    document.querySelector('#pdf-margin-select').dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#pdf-page-numbers').checked = true;
+    document.querySelector('#pdf-page-numbers').dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#pdf-print-background').checked = false;
+    document.querySelector('#pdf-print-background').dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 450));
+    const previews = messages.filter(message => message.type === 'pdf.preview');
+    const latest = previews.at(-1);
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'pdf.previewReady', requestId: latest.requestId,
+      url: 'https://app.mdviewer/__pdf-preview?request=' + latest.requestId
+    } }));
+    const ready = !document.querySelector('#pdf-export-save').disabled;
+    document.querySelector('#pdf-export-save').click();
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'pdf.saveCanceled' }
+    }));
+    document.querySelector('[data-pdf-export-cancel]').click();
+    window.mdViewerNative = originalBridge;
+    return { opened, ready, latest, messages, closed: !dialog.open };
+  })()`);
+  assert.equal(pdfExport.opened, true, "PDF export dialog opens from File");
+  assert.equal(pdfExport.ready, true, "native PDF preview enables exact-file save");
+  assert.deepEqual({
+    paper: pdfExport.latest.paper,
+    orientation: pdfExport.latest.orientation,
+    marginMm: pdfExport.latest.marginMm,
+    pageNumbers: pdfExport.latest.pageNumbers,
+    printBackground: pdfExport.latest.printBackground
+  }, {
+    paper: "letter", orientation: "landscape", marginMm: 10,
+    pageNumbers: true, printBackground: false
+  }, "PDF controls route validated print settings to native code");
+  assert.deepEqual(pdfExport.messages.slice(-2).map(message => message.type),
+    ["pdf.save", "pdf.previewClose"],
+    "PDF save uses the visible preview and closing releases native preview data");
+  assert.equal(pdfExport.closed, true, "PDF export dialog closes cleanly");
+
   const driveDocumentChrome = await evaluate(`(async () => {
     window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
       type: 'document.opened', mode: 'preview', document: {

@@ -23,6 +23,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,12 +32,35 @@
 namespace {
 
 constexpr char kUiOrigin[] = "https://app.mdviewer/";
+constexpr char kPdfViewerOrigin[] =
+    "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/";
 constexpr char kNativeMessageName[] = "MdViewer.NativeMessage";
 constexpr char kHostMessageName[] = "MdViewer.HostMessage";
 
 bool IsApplicationUrl(const std::string& url) {
     return url.compare(0, sizeof(kUiOrigin) - 1, kUiOrigin) == 0;
 }
+
+bool IsPdfViewerUrl(const std::string& url) {
+    return url.compare(0, sizeof(kPdfViewerOrigin) - 1, kPdfViewerOrigin) == 0;
+}
+
+class PdfPrintCallback final : public CefPdfPrintCallback {
+public:
+    using Completion = std::function<void(const std::wstring&, bool)>;
+
+    explicit PdfPrintCallback(Completion completion)
+        : completion_(std::move(completion)) {}
+
+    void OnPdfPrintFinished(const CefString& path, bool success) override {
+        Completion completion = std::move(completion_);
+        if (completion) completion(path.ToWString(), success);
+    }
+
+private:
+    Completion completion_;
+    IMPLEMENT_REFCOUNTING(PdfPrintCallback);
+};
 
 class MemoryResourceHandler final : public CefResourceHandler {
 public:
@@ -63,7 +87,8 @@ public:
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' "
             "'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
-            "font-src 'self'; object-src 'none'; frame-src 'none'; "
+            "font-src 'self'; object-src 'self'; "
+            "frame-src 'self' chrome-extension:; "
             "base-uri 'none'; form-action 'none'",
             true);
         responseLength = static_cast<int64_t>(resource_.bytes.size());
@@ -243,7 +268,8 @@ public:
                         bool isRedirect) override {
         if (!request) return true;
         const std::string url = request->GetURL().ToString();
-        return url != "about:blank" && !IsApplicationUrl(url);
+        return url != "about:blank" && !IsApplicationUrl(url) &&
+            !IsPdfViewerUrl(url);
     }
 
     bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser,
@@ -310,6 +336,60 @@ public:
         auto message = CefProcessMessage::Create(kHostMessageName);
         message->GetArgumentList()->SetString(0, json);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
+    }
+
+    bool PrintToPdf(std::uint64_t requestId,
+                    const std::wstring& path,
+                    const PdfPrintSettings& settings) {
+        CefRefPtr<CefBrowser> browser;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            browser = browser_;
+        }
+        if (!browser || path.empty()) return false;
+
+        constexpr double millimetersPerInch = 25.4;
+        CefPdfPrintSettings printSettings;
+        printSettings.landscape = settings.landscape ? 1 : 0;
+        printSettings.print_background = settings.printBackground ? 1 : 0;
+        printSettings.scale = 1.0;
+        printSettings.paper_width =
+            settings.paperWidthMillimeters / millimetersPerInch;
+        printSettings.paper_height =
+            settings.paperHeightMillimeters / millimetersPerInch;
+        printSettings.prefer_css_page_size = 0;
+        // The print stylesheet paints cloned per-page padding. Keeping native
+        // margins at zero avoids transparent page edges in Chromium's viewer.
+        printSettings.margin_type = PDF_PRINT_MARGIN_CUSTOM;
+        printSettings.margin_top = 0.0;
+        printSettings.margin_right = 0.0;
+        printSettings.margin_bottom = 0.0;
+        printSettings.margin_left = 0.0;
+        printSettings.display_header_footer = settings.pageNumbers ? 1 : 0;
+        if (settings.pageNumbers) {
+            CefString(&printSettings.header_template) =
+                "<span style='font-size:1px'></span>";
+            CefString(&printSettings.footer_template) =
+                "<div style='box-sizing:border-box;width:100%;padding:0 12mm;"
+                "color:#667085;font:9px Segoe UI,sans-serif;text-align:center'>"
+                "<span class='pageNumber'></span> / "
+                "<span class='totalPages'></span></div>";
+        }
+        printSettings.generate_tagged_pdf = 1;
+        printSettings.generate_document_outline = 1;
+
+        CefRefPtr<BrowserClient> keepAlive(this);
+        browser->GetHost()->PrintToPDF(
+            path, printSettings,
+            new PdfPrintCallback(
+                [keepAlive, requestId](const std::wstring& finishedPath,
+                                       bool success) {
+                    if (auto* delegate = keepAlive->delegate_.load()) {
+                        delegate->OnPdfPrintFinished(
+                            requestId, finishedPath, success);
+                    }
+                }));
+        return true;
     }
 
     void Close() {
@@ -404,6 +484,11 @@ public:
 
     void Resize(int width, int height) override { client_->Resize(width, height); }
     void SendJson(const std::string& json) override { client_->SendJson(json); }
+    bool PrintToPdf(std::uint64_t requestId,
+                    const std::wstring& path,
+                    const PdfPrintSettings& settings) override {
+        return client_->PrintToPdf(requestId, path, settings);
+    }
     void Close() override {
         if (closeStarted_.exchange(true)) return;
         client_->Close();

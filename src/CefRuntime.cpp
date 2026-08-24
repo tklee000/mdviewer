@@ -67,7 +67,6 @@ public:
         const CefString& processType,
         CefRefPtr<CefCommandLine> commandLine) override {
         commandLine->AppendSwitch("disable-dev-tools");
-        commandLine->AppendSwitch("disable-extensions");
         commandLine->AppendSwitch("disable-component-update");
         commandLine->AppendSwitch("disable-pinch");
         commandLine->AppendSwitch("no-first-run");

@@ -22,6 +22,8 @@ public:
     virtual void SetDocumentArchive(
         std::shared_ptr<const mdz::Entries> entries,
         const std::string& entryPoint) = 0;
+    virtual void SetPdfPreview(
+        std::shared_ptr<const std::vector<unsigned char>> bytes) = 0;
 };
 
 std::shared_ptr<UiResourceProvider> CreatePlatformUiResourceProvider(

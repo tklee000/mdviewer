@@ -1,9 +1,12 @@
 #include "Json.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cctype>
 #include <cstdio>
+#include <string_view>
 
 namespace {
 
@@ -63,6 +66,46 @@ void AppendUtf8(std::string& output, unsigned int point) {
         output.push_back(static_cast<char>(0x80 | (point & 0x3F)));
     }
 }
+
+#ifndef _WIN32
+bool DecodeUtf8Point(std::string_view input, size_t& cursor,
+                     unsigned int& point) {
+    if (cursor >= input.size()) return false;
+    const unsigned char first = static_cast<unsigned char>(input[cursor++]);
+    if (first <= 0x7F) {
+        point = first;
+        return true;
+    }
+
+    unsigned int minimum = 0;
+    int continuationCount = 0;
+    if (first >= 0xC2 && first <= 0xDF) {
+        point = first & 0x1F;
+        minimum = 0x80;
+        continuationCount = 1;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        point = first & 0x0F;
+        minimum = 0x800;
+        continuationCount = 2;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        point = first & 0x07;
+        minimum = 0x10000;
+        continuationCount = 3;
+    } else {
+        return false;
+    }
+    if (input.size() - cursor < static_cast<size_t>(continuationCount)) {
+        return false;
+    }
+    for (int index = 0; index < continuationCount; ++index) {
+        const unsigned char next = static_cast<unsigned char>(input[cursor++]);
+        if ((next & 0xC0) != 0x80) return false;
+        point = (point << 6) | (next & 0x3F);
+    }
+    return point >= minimum && point <= 0x10FFFF &&
+           !(point >= 0xD800 && point <= 0xDFFF);
+}
+#endif
 
 }  // namespace
 
@@ -172,6 +215,7 @@ std::optional<std::int64_t> GetInteger(const std::string& object,
 }
 
 std::string WideToUtf8(const std::wstring& value) {
+#ifdef _WIN32
     if (value.empty()) return {};
     const int size = WideCharToMultiByte(
         CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
@@ -182,9 +226,34 @@ std::string WideToUtf8(const std::wstring& value) {
                         static_cast<int>(value.size()), output.data(), size,
                         nullptr, nullptr);
     return output;
+#else
+    std::string output;
+    output.reserve(value.size());
+    for (size_t index = 0; index < value.size(); ++index) {
+        unsigned int point = static_cast<unsigned int>(value[index]);
+        if constexpr (sizeof(wchar_t) == 2) {
+            if (point >= 0xD800 && point <= 0xDBFF) {
+                if (++index >= value.size()) return {};
+                const unsigned int second =
+                    static_cast<unsigned int>(value[index]);
+                if (second < 0xDC00 || second > 0xDFFF) return {};
+                point = 0x10000 + ((point - 0xD800) << 10) +
+                        (second - 0xDC00);
+            } else if (point >= 0xDC00 && point <= 0xDFFF) {
+                return {};
+            }
+        }
+        if (point > 0x10FFFF || (point >= 0xD800 && point <= 0xDFFF)) {
+            return {};
+        }
+        AppendUtf8(output, point);
+    }
+    return output;
+#endif
 }
 
 std::wstring Utf8ToWide(const std::string& value, bool allowAnsiFallback) {
+#ifdef _WIN32
     if (value.empty()) return {};
     UINT codePage = CP_UTF8;
     DWORD flags = MB_ERR_INVALID_CHARS;
@@ -203,12 +272,49 @@ std::wstring Utf8ToWide(const std::string& value, bool allowAnsiFallback) {
     MultiByteToWideChar(codePage, flags, value.data(),
                         static_cast<int>(value.size()), output.data(), size);
     return output;
+#else
+    std::wstring output;
+    output.reserve(value.size());
+    size_t cursor = 0;
+    while (cursor < value.size()) {
+        unsigned int point = 0;
+        if (!DecodeUtf8Point(value, cursor, point)) {
+            if (!allowAnsiFallback) return {};
+            output.clear();
+            for (const unsigned char byte : value) {
+                output.push_back(static_cast<wchar_t>(byte));
+            }
+            return output;
+        }
+        if constexpr (sizeof(wchar_t) == 2) {
+            if (point <= 0xFFFF) {
+                output.push_back(static_cast<wchar_t>(point));
+            } else {
+                point -= 0x10000;
+                output.push_back(static_cast<wchar_t>(0xD800 + (point >> 10)));
+                output.push_back(static_cast<wchar_t>(0xDC00 + (point & 0x3FF)));
+            }
+        } else {
+            output.push_back(static_cast<wchar_t>(point));
+        }
+    }
+    return output;
+#endif
 }
 
 bool IsValidUtf8(const std::string& value) {
+#ifdef _WIN32
     if (value.empty()) return true;
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
                                static_cast<int>(value.size()), nullptr, 0) > 0;
+#else
+    size_t cursor = 0;
+    while (cursor < value.size()) {
+        unsigned int point = 0;
+        if (!DecodeUtf8Point(value, cursor, point)) return false;
+    }
+    return true;
+#endif
 }
 
 }  // namespace json

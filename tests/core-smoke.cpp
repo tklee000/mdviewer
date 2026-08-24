@@ -1,4 +1,6 @@
 #include "GoogleDriveClient.h"
+#include "DocxArchive.h"
+#include "HwpxArchive.h"
 #include "Json.h"
 #include "MdzArchive.h"
 #include "RecentDocuments.h"
@@ -187,6 +189,99 @@ int main() {
         if (corrupt.size() > 40) corrupt[40] ^= 0x20;
         okay &= Expect(!mdz::ReadBytes(corrupt, &reopened, &archiveError),
                        "MDZ reader rejects corrupt compressed data");
+    }
+
+    {
+        hwpx::Document document;
+        document.title = "HWPX test";
+        document.author = "MdViewer";
+        document.previewText = "제목\n본문과 이미지";
+        document.sectionXml =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
+            "<hs:sec xmlns:hs=\"http://www.hancom.co.kr/hwpml/2011/section\" "
+            "xmlns:hp=\"http://www.hancom.co.kr/hwpml/2011/paragraph\" "
+            "xmlns:hc=\"http://www.hancom.co.kr/hwpml/2011/core\">"
+            "<hp:p id=\"1\" paraPrIDRef=\"0\" styleIDRef=\"0\" pageBreak=\"0\" "
+            "columnBreak=\"0\" merged=\"0\"><hp:run charPrIDRef=\"7\">"
+            "<hp:secPr id=\"\" textDirection=\"HORIZONTAL\"/>"
+            "<hp:t>제목</hp:t></hp:run><hp:run charPrIDRef=\"7\">"
+            "<hp:pic><hc:img binaryItemIDRef=\"image1\"/></hp:pic>"
+            "</hp:run></hp:p></hs:sec>";
+        document.images.push_back({"image1", "image/png", ".png",
+                                   {0x89, 'P', 'N', 'G'}});
+        std::string archive;
+        std::wstring archiveError;
+        okay &= Expect(hwpx::BuildBytes(document, &archive, &archiveError),
+                       "HWPX archive is built");
+        okay &= Expect(archive.size() > 64 && archive.substr(0, 4) == "PK\x03\x04",
+                       "HWPX output is a ZIP package");
+        okay &= Expect(static_cast<unsigned char>(archive[8]) == 0 &&
+                           static_cast<unsigned char>(archive[9]) == 0,
+                       "HWPX mimetype entry uses ZIP STORE");
+        okay &= Expect(archive.substr(30, 8) == "mimetype" &&
+                           archive.substr(38, std::char_traits<char>::length(
+                               hwpx::kMimeType)) == hwpx::kMimeType,
+                       "HWPX mimetype is the first archive payload");
+        okay &= Expect(archive.find("Contents/header.xml") != std::string::npos &&
+                           archive.find("Contents/section0.xml") != std::string::npos &&
+                           archive.find("BinData/image1.png") != std::string::npos,
+                       "HWPX package declares its required and image entries");
+
+        hwpx::Document invalid = document;
+        invalid.sectionXml = "<hs:sec/>";
+        okay &= Expect(!hwpx::BuildBytes(invalid, &archive, &archiveError),
+                       "HWPX writer rejects a section without page properties");
+        invalid = document;
+        invalid.images.front().id = "../image";
+        okay &= Expect(!hwpx::BuildBytes(invalid, &archive, &archiveError),
+                       "HWPX writer rejects unsafe image identifiers");
+    }
+
+    {
+        docx::Document document;
+        document.title = "DOCX test";
+        document.author = "MdViewer";
+        document.sansSerif = true;
+        document.documentXml =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+            "<w:body><w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/>"
+            "<w:numId w:val=\"1\"/></w:numPr></w:pPr>"
+            "<w:hyperlink r:id=\"rIdLink1\"><w:r><w:t>링크</w:t></w:r></w:hyperlink>"
+            "<w:r><w:drawing><a:blip xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+            "r:embed=\"rIdImage1\"/></w:drawing></w:r></w:p>"
+            "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>"
+            "</w:body></w:document>";
+        document.images.push_back({"image1", "image/png", ".png",
+                                   {0x89, 'P', 'N', 'G'}});
+        document.hyperlinks.push_back({"link1", "https://example.com/docs?a=1&b=2"});
+        document.lists.push_back({true, 3});
+        std::string archive;
+        std::wstring archiveError;
+        okay &= Expect(docx::BuildBytes(document, &archive, &archiveError),
+                       "DOCX archive is built");
+        okay &= Expect(archive.size() > 64 && archive.substr(0, 4) == "PK\x03\x04",
+                       "DOCX output is a ZIP package");
+        okay &= Expect(archive.find("[Content_Types].xml") != std::string::npos &&
+                           archive.find("word/document.xml") != std::string::npos &&
+                           archive.find("word/styles.xml") != std::string::npos &&
+                           archive.find("word/numbering.xml") != std::string::npos &&
+                           archive.find("word/media/image1.png") != std::string::npos,
+                       "DOCX package declares required and image entries");
+
+        docx::Document invalid = document;
+        invalid.documentXml = "<w:document/>";
+        okay &= Expect(!docx::BuildBytes(invalid, &archive, &archiveError),
+                       "DOCX writer rejects incomplete document XML");
+        invalid = document;
+        invalid.images.front().id = "../image";
+        okay &= Expect(!docx::BuildBytes(invalid, &archive, &archiveError),
+                       "DOCX writer rejects unsafe image identifiers");
+        invalid = document;
+        invalid.hyperlinks.front().target = "file:///C:/secret.txt";
+        okay &= Expect(!docx::BuildBytes(invalid, &archive, &archiveError),
+                       "DOCX writer rejects unsafe hyperlink targets");
     }
 
     {

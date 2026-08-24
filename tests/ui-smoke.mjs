@@ -199,6 +199,74 @@ try {
     previewVisible: true, sourceHidden: true, currentMode: "preview",
     toolbarModeSwitchRemoved: true, toggleIsFirstStatusItem: true
   }, "preview is the default and mode switching lives at bottom left");
+  const japaneseUiFonts = await evaluate(`(async () => {
+    await window.MdViewerI18n.setLocale('ja-JP');
+    const font = (selector) => getComputedStyle(document.querySelector(selector)).fontFamily;
+    const result = {
+      locale: document.documentElement.lang,
+      menu: font('.menu-trigger'),
+      toolbar: font('.toolbar'),
+      dialog: font('#pdf-export-dialog'),
+      statusbar: font('.statusbar'),
+      source: font('#source-editor'),
+      preview: font('#preview-editor'),
+      docxPreview: font('#docx-document-preview'),
+      hwpxPreview: font('#hwpx-document-preview')
+    };
+    await window.MdViewerI18n.setLocale('en-US');
+    result.englishMenu = font('.menu-trigger');
+    return result;
+  })()`);
+  assert.equal(japaneseUiFonts.locale, "ja-JP", "Japanese locale updates the document language");
+  for (const area of ["menu", "toolbar", "dialog", "statusbar"]) {
+    assert.match(japaneseUiFonts[area], /MS UI Gothic/i,
+      `${area} uses MS UI Gothic for Japanese UI`);
+  }
+  for (const area of ["source", "preview", "docxPreview", "hwpxPreview"]) {
+    assert.doesNotMatch(japaneseUiFonts[area], /MS UI Gothic/i,
+      `${area} keeps its document font in Japanese UI`);
+  }
+  assert.doesNotMatch(japaneseUiFonts.englishMenu, /MS UI Gothic/i,
+    "non-Japanese UI restores the normal application font");
+  const exportDialogLayout = await evaluate(`(() => {
+    const definitions = [
+      ['pdf-export-dialog', '.pdf-export-settings'],
+      ['docx-export-dialog', '.hwpx-export-settings'],
+      ['hwpx-export-dialog', '.hwpx-export-settings']
+    ];
+    return definitions.map(([id, settingsSelector]) => {
+      const dialog = document.getElementById(id);
+      dialog.showModal();
+      const rounded = (element) => {
+        const rect = element.getBoundingClientRect();
+        return { width: Math.round(rect.width), height: Math.round(rect.height) };
+      };
+      const result = {
+        dialog: rounded(dialog),
+        header: rounded(dialog.querySelector('.settings-dialog-header')),
+        settings: rounded(dialog.querySelector(settingsSelector)),
+        previewToolbar: rounded(dialog.querySelector('.export-preview-toolbar'))
+      };
+      dialog.close();
+      return result;
+    });
+  })()`);
+  for (const property of ['dialog', 'header', 'settings', 'previewToolbar']) {
+    assert.deepEqual(exportDialogLayout.map(layout => layout[property]),
+      Array(3).fill(exportDialogLayout[0][property]),
+      `PDF, DOCX, and HWPX export ${property} dimensions stay aligned`);
+  }
+  assert.deepEqual(await evaluate(`[
+    getComputedStyle(document.querySelector('#docx-document-preview')).borderRadius,
+    getComputedStyle(document.querySelector('#hwpx-document-preview')).borderRadius
+  ]`), ['0px', '0px'],
+  "DOCX and HWPX preview pages use square corners");
+  assert.deepEqual(await evaluate(`[
+    getComputedStyle(document.querySelector('#pdf-preview-frame')).backgroundColor,
+    getComputedStyle(document.querySelector('#docx-document-preview').parentElement).backgroundColor,
+    getComputedStyle(document.querySelector('#hwpx-document-preview').parentElement).backgroundColor
+  ]`), Array(3).fill('rgb(82, 86, 89)'),
+  "PDF, DOCX, and HWPX preview surfaces use the same gray background");
   const darkThemeNeutrals = await evaluate(`(() => {
     const style = getComputedStyle(document.documentElement);
     return ['--bg', '--stage', '--surface', '--surface-soft', '--surface-raised',
@@ -330,15 +398,23 @@ try {
     return messages;
   })()`), [{ type: "recent.refresh" }],
   "opening File refreshes recents shared by other MdViewer windows");
+  assert.deepEqual(await evaluate(`[
+    ...document.querySelectorAll('[data-menu-command^="file.export"]')
+  ].map(item => item.dataset.menuCommand)`), ["file.export"],
+  "File exposes one unified Export command");
 
   const pdfExport = await evaluate(`(async () => {
     const messages = [];
     const originalBridge = window.mdViewerNative;
     window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
-    document.querySelector('[data-menu-command="file.exportPdf"]').click();
+    localStorage.setItem('mdviewer.exportFormat', 'pdf');
+    document.querySelector('[data-menu-command="file.export"]').click();
     await new Promise(resolve => setTimeout(resolve, 100));
     const dialog = document.querySelector('#pdf-export-dialog');
     const opened = dialog.open;
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const backdropStayedOpen = dialog.open;
+    const format = dialog.querySelector('[data-export-format-select]').value;
     document.querySelector('#pdf-paper-select').value = 'letter';
     document.querySelector('#pdf-paper-select').dispatchEvent(new Event('change', { bubbles: true }));
     const landscape = document.querySelector('input[name="pdf-orientation"][value="landscape"]');
@@ -364,9 +440,12 @@ try {
     }));
     document.querySelector('[data-pdf-export-cancel]').click();
     window.mdViewerNative = originalBridge;
-    return { opened, ready, latest, messages, closed: !dialog.open };
+    return { opened, backdropStayedOpen, format, ready, latest, messages, closed: !dialog.open };
   })()`);
-  assert.equal(pdfExport.opened, true, "PDF export dialog opens from File");
+  assert.equal(pdfExport.opened, true, "unified Export menu opens the PDF export dialog");
+  assert.equal(pdfExport.backdropStayedOpen, true,
+    "clicking outside the PDF export content does not close the dialog");
+  assert.equal(pdfExport.format, "pdf", "the export dialog shows the active PDF format");
   assert.equal(pdfExport.ready, true, "native PDF preview enables exact-file save");
   assert.deepEqual({
     paper: pdfExport.latest.paper,
@@ -382,6 +461,290 @@ try {
     ["pdf.save", "pdf.previewClose"],
     "PDF save uses the visible preview and closing releases native preview data");
   assert.equal(pdfExport.closed, true, "PDF export dialog closes cleanly");
+
+  const printPreview = await evaluate(`(async () => {
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.print"]').click();
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const dialog = document.querySelector('#pdf-export-dialog');
+    const opened = dialog.open;
+    const title = document.querySelector('#pdf-export-dialog-title').textContent;
+    const pageRangeVisible = !document.querySelector('#pdf-page-range-settings').hidden;
+    const printerSettingsVisible = !document.querySelector('#pdf-printer-settings').hidden;
+    const printLabel = document.querySelector('#pdf-export-save').textContent;
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'printer.listed', printers: [
+        { name: 'Test Office Printer', isDefault: true },
+        { name: 'Test PDF Printer', isDefault: false }
+      ]
+    } }));
+    const printer = document.querySelector('#pdf-printer-select');
+    printer.value = 'Test Office Printer';
+    printer.dispatchEvent(new Event('change', { bubbles: true }));
+    const propertiesButton = document.querySelector('#pdf-printer-properties');
+    const propertiesAvailable = !propertiesButton.disabled;
+    propertiesButton.click();
+    const propertiesRequest = messages.at(-1);
+    const propertiesBusy = propertiesButton.disabled && printer.disabled &&
+      document.querySelector('#pdf-export-save').disabled;
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'printer.propertiesApplied', printerName: 'Test Office Printer'
+    } }));
+    const propertiesApplied = !propertiesButton.disabled &&
+      document.querySelector('#pdf-printer-properties-status').textContent ===
+        'Advanced printer settings applied';
+    const copies = document.querySelector('#pdf-print-copies');
+    copies.value = '3';
+    copies.dispatchEvent(new Event('input', { bubbles: true }));
+    const previewsBeforeInvalid = messages.filter(message => message.type === 'pdf.preview').length;
+
+    const custom = document.querySelector('input[name="pdf-print-pages"][value="custom"]');
+    custom.checked = true;
+    custom.dispatchEvent(new Event('change', { bubbles: true }));
+    const range = document.querySelector('#pdf-page-range-input');
+    range.value = '4-2';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 420));
+    const invalid = range.getAttribute('aria-invalid') === 'true' &&
+      document.querySelector('#pdf-page-range-error').hidden === false &&
+      document.querySelector('#pdf-export-save').disabled;
+    const invalidPreviewBlocked = messages.filter(
+      message => message.type === 'pdf.preview').length === previewsBeforeInvalid;
+
+    range.value = '2-4, 7';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 460));
+    const previews = messages.filter(message => message.type === 'pdf.preview');
+    const latest = previews.at(-1);
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'pdf.previewReady', requestId: latest.requestId,
+      url: 'https://app.mdviewer/__pdf-preview?request=' + latest.requestId
+    } }));
+    document.querySelector('#pdf-preview-frame').dispatchEvent(new Event('load'));
+    const ready = !document.querySelector('#pdf-export-save').disabled;
+    document.querySelector('#pdf-export-save').click();
+    const printRequest = messages.at(-1);
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'pdf.printStarted' }
+    }));
+    const busy = document.querySelector('#pdf-export-save').disabled &&
+      document.querySelector('[data-pdf-export-cancel]').disabled;
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: {
+        type: 'pdf.printed', printerName: 'Test Office Printer',
+        copies: 3, pageCount: 4
+      }
+    }));
+    window.mdViewerNative = originalBridge;
+    return {
+      opened, title, pageRangeVisible, printerSettingsVisible, printLabel, invalid,
+      propertiesAvailable, propertiesRequest, propertiesBusy, propertiesApplied,
+      invalidPreviewBlocked, latest, ready, printRequest, busy,
+      closed: !dialog.open
+    };
+  })()`);
+  assert.equal(printPreview.opened, true, "Print opens a modal preview from File");
+  assert.equal(printPreview.title, "Print", "Print reuses the exact PDF preview dialog in print mode");
+  assert.equal(printPreview.pageRangeVisible, true, "Print exposes page-range controls");
+  assert.equal(printPreview.printerSettingsVisible, true,
+    "the first print dialog exposes printer and copy controls");
+  assert.equal(printPreview.propertiesAvailable, true,
+    "advanced printer settings are available for the selected printer");
+  assert.deepEqual(printPreview.propertiesRequest, {
+    type: "printer.properties", printerName: "Test Office Printer"
+  }, "advanced settings requests the selected printer's driver properties");
+  assert.equal(printPreview.propertiesBusy, true,
+    "printing controls are locked while printer properties are open");
+  assert.equal(printPreview.propertiesApplied, true,
+    "applied driver properties are reported in the first print dialog");
+  assert.equal(printPreview.printLabel, "Print…", "Print mode has a printer action");
+  assert.equal(printPreview.invalid, true, "descending page ranges are rejected inline");
+  assert.equal(printPreview.invalidPreviewBlocked, true,
+    "invalid page ranges do not request a stale native preview");
+  assert.equal(printPreview.latest.pageRanges, "2-4,7",
+    "print page ranges are normalized before native preview generation");
+  assert.equal(printPreview.ready, true,
+    "the printer action waits until the ranged PDF frame is loaded");
+  assert.deepEqual(printPreview.printRequest, {
+    type: "pdf.print", requestId: printPreview.latest.requestId,
+    printerName: "Test Office Printer", copies: 3
+  }, "Print sends the first dialog's printer and copies directly to native code");
+  assert.equal(printPreview.busy, true,
+    "the first dialog remains locked while the direct print job is spooled");
+  assert.equal(printPreview.closed, true, "Print preview dialog closes cleanly");
+  assert.equal(await evaluate(`(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'p', ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    const dialog = document.querySelector('#pdf-export-dialog');
+    const opened = dialog.open &&
+      document.querySelector('#pdf-export-dialog-title').textContent === 'Print';
+    document.querySelector('[data-pdf-export-cancel]').click();
+    return opened && !dialog.open;
+  })()`), true, "Ctrl+P opens and closes the print preview");
+
+  const docxExport = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.opened', mode: 'preview', document: {
+        origin: 'local', path: 'C:\\notes\\워드.md', name: '워드.md',
+        text: '# 제목\\n\\n본문 **굵게**와 [링크](https://example.com/docs?a=1&b=2)\\n\\n1. 첫째\\n2. 둘째\\n\\n| 열 A | 열 B |\\n| --- | --- |\\n| 값 1 | 값 2 |\\n\\n> 인용문\\n\\n\`\`\`js\\nconst answer = 42;\\n\`\`\`',
+        dirty: false, encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.export"]').click();
+    const pdfDialog = document.querySelector('#pdf-export-dialog');
+    const formatSelect = pdfDialog.querySelector('[data-export-format-select]');
+    formatSelect.value = 'docx';
+    formatSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    const dialog = document.querySelector('#docx-export-dialog');
+    const opened = dialog.open;
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const backdropStayedOpen = dialog.open;
+    const switchedFromPdf = !pdfDialog.open &&
+      dialog.querySelector('[data-export-format-select]').value === 'docx';
+    document.querySelector('#docx-paper-select').value = 'letter';
+    const landscape = document.querySelector('input[name="docx-orientation"][value="landscape"]');
+    landscape.checked = true;
+    landscape.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#docx-margin-select').value = '10';
+    document.querySelector('#docx-font-select').value = 'sans';
+    document.querySelector('#docx-title-input').value = '내보낸 Word 문서';
+    document.querySelector('#docx-author-input').value = 'MdViewer 테스트';
+    document.querySelector('#docx-export-save').click();
+    for (let attempt = 0; attempt < 50 && !messages.some(message =>
+      message.type === 'docx.export'); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const exported = messages.find(message => message.type === 'docx.export');
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'docx.saveCanceled' }
+    }));
+    document.querySelector('[data-docx-export-cancel]').click();
+    window.mdViewerNative = originalBridge;
+    return { opened, backdropStayedOpen, switchedFromPdf, exported, closed: !dialog.open };
+  })()`);
+  assert.equal(docxExport.opened, true, "DOCX opens from the unified export format selector");
+  assert.equal(docxExport.backdropStayedOpen, true,
+    "clicking outside the DOCX export content does not close the dialog");
+  assert.equal(docxExport.switchedFromPdf, true,
+    "the unified export dialog switches from PDF to DOCX");
+  assert.deepEqual({
+    paper: docxExport.exported.paper,
+    orientation: docxExport.exported.orientation,
+    marginMm: docxExport.exported.marginMm,
+    font: docxExport.exported.font,
+    title: docxExport.exported.title,
+    author: docxExport.exported.author
+  }, {
+    paper: "letter", orientation: "landscape", marginMm: 10, font: "sans",
+    title: "내보낸 Word 문서", author: "MdViewer 테스트"
+  }, "DOCX controls route page and document metadata to native code");
+  assert.match(docxExport.exported.documentXml,
+    /<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"\/>/,
+    "DOCX document uses Letter landscape dimensions");
+  assert.match(docxExport.exported.documentXml,
+    /<w:pgMar w:top="567" w:right="567" w:bottom="567" w:left="567"/,
+    "DOCX document uses 10 mm margins");
+  assert.match(docxExport.exported.documentXml, /<w:pStyle w:val="Heading1"\/>/,
+    "DOCX uses editable Word heading styles");
+  assert.match(docxExport.exported.documentXml, /<w:numPr>/,
+    "DOCX uses editable Word numbering");
+  assert.match(docxExport.exported.documentXml, /<w:tbl>/,
+    "DOCX preserves Markdown tables as Word tables");
+  assert.match(docxExport.exported.documentXml, /<w:hyperlink r:id="rIdLink1"/,
+    "DOCX preserves links as Word hyperlinks");
+  assert.match(docxExport.exported.hyperlinks, /^link1\thttps:\/\/example\.com\//,
+    "DOCX sends safe hyperlink relationships to native packaging");
+  assert.match(docxExport.exported.lists, /^ordered\t1/m,
+    "DOCX sends real numbering definitions to native packaging");
+  assert.equal(docxExport.closed, true, "DOCX export dialog closes cleanly");
+
+  const hwpxExport = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.opened', mode: 'preview', document: {
+        origin: 'local', path: 'C:\\\\notes\\\\한글.md', name: '한글.md',
+        text: '# 제목\\n\\n본문 **굵게**\\n\\n- 목록\\n\\n| 열 A | 열 B |\\n| --- | --- |\\n| 값 1 | 값 2 |\\n\\n\`\`\`js\\nconst answer = 42;\\n\`\`\`',
+        dirty: false, encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    document.querySelector('[data-menu-command="file.export"]').click();
+    const docxDialog = document.querySelector('#docx-export-dialog');
+    const formatSelect = docxDialog.querySelector('[data-export-format-select]');
+    formatSelect.value = 'hwpx';
+    formatSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    const dialog = document.querySelector('#hwpx-export-dialog');
+    const opened = dialog.open;
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const backdropStayedOpen = dialog.open;
+    const switchedFromDocx = !docxDialog.open &&
+      dialog.querySelector('[data-export-format-select]').value === 'hwpx';
+    document.querySelector('#hwpx-paper-select').value = 'letter';
+    const landscape = document.querySelector('input[name="hwpx-orientation"][value="landscape"]');
+    landscape.checked = true;
+    landscape.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#hwpx-margin-select').value = '10';
+    document.querySelector('#hwpx-font-select').value = 'sans';
+    document.querySelector('#hwpx-title-input').value = '내보낸 문서';
+    document.querySelector('#hwpx-author-input').value = 'MdViewer 테스트';
+    document.querySelector('#hwpx-export-save').click();
+    for (let attempt = 0; attempt < 50 && !messages.some(message =>
+      message.type === 'hwpx.export'); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const exported = messages.find(message => message.type === 'hwpx.export');
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', {
+      detail: { type: 'hwpx.saveCanceled' }
+    }));
+    document.querySelector('[data-hwpx-export-cancel]').click();
+    window.mdViewerNative = originalBridge;
+    return { opened, backdropStayedOpen, switchedFromDocx, exported, closed: !dialog.open };
+  })()`);
+  assert.equal(hwpxExport.opened, true, "HWPX opens from the unified export format selector");
+  assert.equal(hwpxExport.backdropStayedOpen, true,
+    "clicking outside the HWPX export content does not close the dialog");
+  assert.equal(hwpxExport.switchedFromDocx, true,
+    "the unified export dialog switches from DOCX to HWPX");
+  assert.deepEqual({
+    paper: hwpxExport.exported.paper,
+    orientation: hwpxExport.exported.orientation,
+    marginMm: hwpxExport.exported.marginMm,
+    font: hwpxExport.exported.font,
+    title: hwpxExport.exported.title,
+    author: hwpxExport.exported.author
+  }, {
+    paper: "letter", orientation: "landscape", marginMm: 10, font: "sans",
+    title: "내보낸 문서", author: "MdViewer 테스트"
+  }, "HWPX controls route page and document metadata to native code");
+  assert.match(hwpxExport.exported.sectionXml, /<hp:secPr /,
+    "HWPX section contains editable page properties");
+  assert.match(hwpxExport.exported.sectionXml,
+    /<hp:pagePr landscape="WIDELY" width="79200" height="61200"[^>]*><hp:margin[^>]*left="2835"[^>]*right="2835"[^>]*top="2835"[^>]*bottom="2835"/,
+    "HWPX section uses Letter landscape dimensions and 10 mm margins");
+  assert.match(hwpxExport.exported.sectionXml, /<hp:tbl /,
+    "HWPX section preserves Markdown tables");
+  assert.match(hwpxExport.exported.sectionXml, /제목/,
+    "HWPX section preserves Unicode text");
+  assert.equal(hwpxExport.closed, true, "HWPX export dialog closes cleanly");
+  assert.equal(await evaluate(`(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'e', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true
+    }));
+    const dialog = document.querySelector('#hwpx-export-dialog');
+    const opened = dialog.open &&
+      dialog.querySelector('[data-export-format-select]').value === 'hwpx';
+    document.querySelector('[data-hwpx-export-cancel]').click();
+    return opened && !dialog.open;
+  })()`), true, "Ctrl+Shift+E reopens the unified exporter in its last format");
 
   const driveDocumentChrome = await evaluate(`(async () => {
     window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {

@@ -40,38 +40,44 @@ set(MDVIEWER_SOURCES
   src/CefRuntime.h
   src/Config.cpp
   src/Config.h
+  src/DocxArchive.cpp
+  src/DocxArchive.h
   src/FileAssociation.cpp
   src/FileAssociation.h
   src/GoogleDriveClient.cpp
   src/GoogleDriveClient.h
+  src/HwpxArchive.cpp
+  src/HwpxArchive.h
   src/Json.cpp
   src/Json.h
   src/Localization.cpp
   src/Localization.h
   src/MdzArchive.cpp
   src/MdzArchive.h
-  src/mdz_zip/common.h
-  src/mdz_zip/crc32.cpp
-  src/mdz_zip/crc32.h
-  src/mdz_zip/deflate_decoder.cpp
-  src/mdz_zip/deflate_decoder.h
-  src/mdz_zip/deflate_encoder.cpp
-  src/mdz_zip/deflate_encoder.h
-  src/mdz_zip/match.h
-  src/mdz_zip/match_avx2.cpp
-  src/mdz_zip/match_scalar.cpp
-  src/mdz_zip/mzip_codec.cpp
-  src/mdz_zip/platform.cpp
-  src/mdz_zip/platform.h
-  src/mdz_zip/thread_pool.cpp
-  src/mdz_zip/thread_pool.h
-  src/mdz_zip/mzip_codec.h
-  src/mdz_zip/aes256_aesni.cpp
-  src/mdz_zip/aes256_aesni.h
-  src/mdz_zip/crypto.cpp
-  src/mdz_zip/crypto.h
-  src/mdz_zip/zip_archive.cpp
-  src/mdz_zip/zip_archive.h
+  src/PrinterService.cpp
+  src/PrinterService.h
+  src/libmzip/common.h
+  src/libmzip/crc32.cpp
+  src/libmzip/crc32.h
+  src/libmzip/deflate_decoder.cpp
+  src/libmzip/deflate_decoder.h
+  src/libmzip/deflate_encoder.cpp
+  src/libmzip/deflate_encoder.h
+  src/libmzip/match.h
+  src/libmzip/match_avx2.cpp
+  src/libmzip/match_scalar.cpp
+  src/libmzip/mzip_codec.cpp
+  src/libmzip/platform.cpp
+  src/libmzip/platform.h
+  src/libmzip/thread_pool.cpp
+  src/libmzip/thread_pool.h
+  src/libmzip/mzip_codec.h
+  src/libmzip/aes256_aesni.cpp
+  src/libmzip/aes256_aesni.h
+  src/libmzip/crypto.cpp
+  src/libmzip/crypto.h
+  src/libmzip/zip_archive.cpp
+  src/libmzip/zip_archive.h
   src/RecentDocuments.cpp
   src/RecentDocuments.h
   src/UiResourceProvider.h
@@ -119,7 +125,8 @@ target_link_options(MdViewer PRIVATE
 target_link_libraries(MdViewer PRIVATE
   libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS}
   Advapi32.lib Bcrypt.lib Comdlg32.lib Crypt32.lib Dwmapi.lib Ole32.lib
-  Shell32.lib Winhttp.lib Ws2_32.lib)
+  Gdi32.lib Shell32.lib WindowsApp.lib Windowscodecs.lib Winhttp.lib
+  Winspool.lib Ws2_32.lib)
 add_dependencies(MdViewer libcef_dll_wrapper)
 
 if(NOT DEFINED MDVIEWER_OUTPUT_DIR)
@@ -165,6 +172,14 @@ add_custom_command(TARGET MdViewer POST_BUILD
           "${MDVIEWER_OUTPUT_DIR}/licenses/mdzip-spec/NOTICE.txt"
   VERBATIM)
 
+add_custom_command(TARGET MdViewer POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "${MDVIEWER_OUTPUT_DIR}/licenses/owpml"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/licenses/owpml/NOTICE.txt"
+          "${MDVIEWER_OUTPUT_DIR}/licenses/owpml/NOTICE.txt"
+  VERBATIM)
+
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "src" FILES ${MDVIEWER_SOURCES})
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/web" PREFIX "web" FILES ${MDVIEWER_UI_FILES})
 
@@ -174,28 +189,32 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(MdViewerCoreTests
     tests/core-smoke.cpp
+    src/DocxArchive.cpp
+    src/DocxArchive.h
     src/GoogleDriveClient.cpp
     src/GoogleDriveClient.h
+    src/HwpxArchive.cpp
+    src/HwpxArchive.h
     src/Json.cpp
     src/Json.h
     src/MdzArchive.cpp
     src/MdzArchive.h
-    src/mdz_zip/common.h
-    src/mdz_zip/crc32.cpp
-    src/mdz_zip/crc32.h
-    src/mdz_zip/deflate_decoder.cpp
-    src/mdz_zip/deflate_decoder.h
-    src/mdz_zip/deflate_encoder.cpp
-    src/mdz_zip/deflate_encoder.h
-    src/mdz_zip/match.h
-    src/mdz_zip/match_avx2.cpp
-    src/mdz_zip/match_scalar.cpp
-    src/mdz_zip/mzip_codec.cpp
-    src/mdz_zip/platform.cpp
-    src/mdz_zip/platform.h
-    src/mdz_zip/thread_pool.cpp
-    src/mdz_zip/thread_pool.h
-    src/mdz_zip/mzip_codec.h
+    src/libmzip/common.h
+    src/libmzip/crc32.cpp
+    src/libmzip/crc32.h
+    src/libmzip/deflate_decoder.cpp
+    src/libmzip/deflate_decoder.h
+    src/libmzip/deflate_encoder.cpp
+    src/libmzip/deflate_encoder.h
+    src/libmzip/match.h
+    src/libmzip/match_avx2.cpp
+    src/libmzip/match_scalar.cpp
+    src/libmzip/mzip_codec.cpp
+    src/libmzip/platform.cpp
+    src/libmzip/platform.h
+    src/libmzip/thread_pool.cpp
+    src/libmzip/thread_pool.h
+    src/libmzip/mzip_codec.h
     src/RecentDocuments.cpp
     src/RecentDocuments.h)
   target_include_directories(MdViewerCoreTests PRIVATE

@@ -44,7 +44,6 @@ enum class DirectoryEntryPolicy {
 
 struct ArchiveOptions {
     int level = 5;
-    size_t thread_count = std::max<unsigned>(1, std::thread::hardware_concurrency());
     size_t chunk_size = 1u * 1024u * 1024u;
     bool allow_avx2 = true;
     bool allow_aesni = true;
@@ -74,9 +73,6 @@ struct ExtractOptions {
     std::string password;
     ProgressCallback progress;
     CancellationCallback cancel;
-    // Keep this field last so existing positional aggregate initializers remain source-compatible.
-    size_t thread_count = std::min<size_t>(
-        256, std::max<unsigned>(1, std::thread::hardware_concurrency()));
 };
 
 struct ZipEntryInfo {

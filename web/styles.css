@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
-  font-family: Inter, "Segoe UI", "Noto Sans", "Noto Sans CJK KR", "Malgun Gothic", sans-serif;
+  --ui-font-family: Inter, "Segoe UI", "Noto Sans", "Noto Sans CJK KR", "Malgun Gothic", sans-serif;
+  font-family: var(--ui-font-family);
   font-size: 14px;
   color: #f0f0f0;
   background: #121212;
@@ -37,6 +38,10 @@
   --source-font-size: 15px;
   --preview-font-family: Inter, "Segoe UI", "Noto Sans", "Noto Sans CJK KR", "Malgun Gothic", sans-serif;
   --preview-font-size: 16px;
+}
+
+:root[lang="ja-JP"] {
+  --ui-font-family: "MS UI Gothic", "Meiryo UI", "Yu Gothic UI", sans-serif;
 }
 
 :root[data-theme="light"] {
@@ -219,6 +224,13 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   color: var(--text);
   background: var(--surface-soft);
 }
+.export-format-field {
+  margin: 0 0 2px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.export-format-field[hidden] { display: none; }
+.export-format-field select { font-weight: 650; }
 .dialog-check-field {
   display: flex;
   align-items: center;
@@ -242,29 +254,36 @@ button.primary:hover { background: var(--accent-strong); color: white; }
 }
 .settings-dialog-actions button { min-width: 82px; }
 
-.pdf-export-dialog {
+.pdf-export-dialog,
+.hwpx-export-dialog {
+  --export-preview-background: #525659;
   width: min(1180px, calc(100vw - 32px));
   height: min(780px, calc(100vh - 32px));
   max-height: calc(100vh - 32px);
 }
-.pdf-export-shell {
+.pdf-export-shell,
+.hwpx-export-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
 }
-.pdf-export-dialog .settings-dialog-header > div { min-width: 0; }
-.pdf-export-dialog .settings-dialog-header p {
+.pdf-export-dialog .settings-dialog-header > div,
+.hwpx-export-dialog .settings-dialog-header > div { min-width: 0; }
+.pdf-export-dialog .settings-dialog-header p,
+.hwpx-export-dialog .settings-dialog-header p {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12px;
 }
-.pdf-export-content {
+.pdf-export-content,
+.hwpx-export-content {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   min-height: 0;
 }
-.pdf-export-settings {
+.pdf-export-settings,
+.hwpx-export-settings {
   display: flex;
   flex-direction: column;
   gap: 17px;
@@ -314,6 +333,73 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.pdf-page-range-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.pdf-printer-settings {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 0 15px;
+  border-bottom: 1px solid var(--line);
+}
+.pdf-printer-settings[hidden] { display: none; }
+.pdf-printer-settings .dialog-field + .dialog-field { margin-top: 0; }
+.pdf-printer-settings input[type="number"] { appearance: textfield; }
+.pdf-printer-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+.pdf-printer-select-row .dialog-field { min-width: 0; }
+#pdf-printer-properties {
+  width: 100%;
+  min-height: 36px;
+  padding-inline: 11px;
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+  white-space: nowrap;
+}
+.printer-properties-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.printer-properties-status[data-state="applied"] { color: var(--accent-strong); }
+.printer-properties-status[data-state="error"] { color: var(--danger, #d9485f); }
+.printer-properties-status[hidden] { display: none; }
+#pdf-printer-status { display: block; }
+#pdf-printer-status[hidden] { display: none; }
+.pdf-page-range-settings[hidden] { display: none; }
+.pdf-page-range-settings legend {
+  grid-column: 1 / -1;
+  margin-bottom: 1px;
+  color: var(--text-soft);
+}
+.pdf-page-range-settings label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-soft);
+}
+.pdf-page-range-settings input[type="radio"] { accent-color: var(--accent); }
+#pdf-page-range-input,
+#pdf-page-range-error { grid-column: 1 / -1; }
+#pdf-page-range-input:disabled { opacity: .55; }
+.dialog-field-error {
+  color: var(--danger, #d9485f);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.dialog-field-error[hidden] { display: none; }
 .pdf-paper-summary {
   margin: auto 0 0;
   padding: 11px 12px;
@@ -324,19 +410,49 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   font-size: 12px;
   line-height: 1.5;
 }
-.pdf-preview-panel {
+.export-preview-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--export-preview-background);
+}
+.export-preview-toolbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid #656b74;
+  color: #eef0f3;
+  background: #4b5058;
+  font-size: 12px;
+  line-height: 20px;
+}
+.export-preview-toolbar strong { flex: 0 0 auto; }
+.export-preview-toolbar span {
+  min-width: 0;
+  overflow: hidden;
+  color: #cbd0d6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-preview-stage {
   position: relative;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #41454d;
+  background: var(--export-preview-background);
 }
 .pdf-preview-panel iframe {
   display: block;
   width: 100%;
   height: 100%;
   border: 0;
-  background: #52565f;
+  background: var(--export-preview-background);
 }
 .pdf-preview-panel iframe[hidden] { display: none; }
 .pdf-preview-message {
@@ -350,7 +466,7 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   padding: 24px;
   color: #eef0f3;
   text-align: center;
-  background: #41454d;
+  background: var(--export-preview-background);
 }
 .pdf-preview-message[hidden] { display: none; }
 .pdf-preview-message > span:not(.pdf-preview-spinner) {
@@ -384,13 +500,64 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   white-space: nowrap;
 }
 
+.document-preview-scroll {
+  min-width: 0;
+  min-height: 0;
+  padding: 22px 34px 48px;
+  overflow: auto;
+  background: var(--export-preview-background);
+}
+#hwpx-document-preview,
+#docx-document-preview {
+  width: min(100%, 720px);
+  min-height: 900px;
+  margin: 0 auto;
+  padding: 64px 68px;
+  border: 1px solid #bfc4cb;
+  border-radius: 0;
+  color: #20242a;
+  background: #fff;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .28);
+  pointer-events: none;
+  --text: #20242a;
+  --text-soft: #4b5563;
+  --muted: #6b7280;
+  --surface: #fff;
+  --surface-soft: #f4f5f7;
+  --surface-raised: #e9edf2;
+  --line: #d5d9df;
+  --line-strong: #b8bec7;
+  --link: #0563c1;
+  --code-bg: #f1f3f5;
+  --code-text: #20242a;
+  --inline-code: #7c2d12;
+  --inline-code-bg: #f1f3f5;
+  --inline-code-border: #d5d9df;
+}
+.hwpx-export-actions { align-items: center; }
+#hwpx-export-status,
+#docx-export-status {
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 520px) {
   .font-settings-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {
-  .pdf-export-content { grid-template-columns: 1fr; grid-template-rows: auto minmax(240px, 1fr); }
-  .pdf-export-settings {
+  .pdf-export-content,
+  .hwpx-export-content {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(240px, 1fr);
+  }
+  .pdf-export-settings,
+  .hwpx-export-settings {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
@@ -399,6 +566,13 @@ button.primary:hover { background: var(--accent-strong); color: white; }
     border-bottom: 1px solid var(--line);
   }
   .pdf-paper-summary { display: none; }
+  .hwpx-export-dialog { height: calc(100vh - 24px); }
+  .document-preview-scroll { padding: 14px 14px 32px; }
+  #hwpx-document-preview,
+  #docx-document-preview {
+    min-height: 720px;
+    padding: 42px 38px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

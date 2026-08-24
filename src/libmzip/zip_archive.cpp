@@ -4,7 +4,6 @@
 #include "deflate_decoder.h"
 #include "deflate_encoder.h"
 #include "platform.h"
-#include "thread_pool.h"
 
 #include <cctype>
 #include <cwchar>
@@ -1261,7 +1260,6 @@ void write_verification_report(const std::filesystem::path& report_path,
            << (options.directories == DirectoryEntryPolicy::Include ? "Include" : "Omit") << "\n"
            << "ZIP entry root: "
            << (options.entry_root.empty() ? "<default>" : path_to_utf8(options.entry_root)) << "\n"
-           << "Threads: " << options.thread_count << "\n"
            << "Block size: " << options.chunk_size << " bytes\n"
            << "Encryption: " << (options.password.empty() ? "OFF" : "WinZip AES-256") << "\n"
            << "AVX2 allowed: " << (options.allow_avx2 ? "yes" : "no") << "\n"
@@ -1476,13 +1474,10 @@ void create_zip(const std::filesystem::path& output,
     report_progress(options.progress, ProgressStage::Compressing,
                     progress_completed_bytes, progress_total_bytes,
                     progress_completed_files, progress_total_files);
-    const size_t thread_count = std::max<size_t>(1, options.thread_count);
     const bool avx2 = options.allow_avx2 && cpu_has_avx2();
     const bool aesni = options.allow_aesni && cpu_has_aesni();
     const bool always_store = options.compression == CompressionPolicy::AlwaysStore;
     const bool always_deflate = options.compression == CompressionPolicy::AlwaysDeflate;
-    ThreadPool pool(thread_count);
-
     const std::filesystem::path temporary_output = make_temporary_path(output);
     TemporaryFileGuard temporary_output_guard(temporary_output);
     throw_if_cancelled(options.cancel);
@@ -1495,8 +1490,7 @@ void create_zip(const std::filesystem::path& output,
     uint64_t total_out = 0;
 
     if (options.verbose) {
-        std::cout << "mzip: threads=" << thread_count
-                  << ", AVX2=" << (avx2 ? "ON" : "OFF")
+        std::cout << "mzip: AVX2=" << (avx2 ? "ON" : "OFF")
                   << ", level=" << options.level
                   << ", block=" << format_bytes(options.chunk_size)
                   << ", encryption=" << (options.password.empty() ? "OFF" : "AES-256")
@@ -1516,21 +1510,22 @@ void create_zip(const std::filesystem::path& output,
             (always_deflate || (options.level > 0 && payload.mapped->size() > 0));
         if (try_deflate &&
             payload.mapped->size() <= static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-            DeflateOptions deflate;
-            deflate.level = options.level;
-            deflate.chunk_size = options.chunk_size;
-            deflate.use_avx2 = avx2;
-            deflate.cancel = options.cancel;
-            if (options.progress && progress_total_files == 1) {
-                deflate.progress = [&](size_t completed_in_file) {
+            DeflateOptions deflate_options;
+            deflate_options.level = options.level;
+            deflate_options.chunk_size = options.chunk_size;
+            deflate_options.use_avx2 = avx2;
+            deflate_options.cancel = options.cancel;
+            if (options.progress) {
+                deflate_options.progress = [&](size_t completed_in_file) {
                     report_progress(options.progress, ProgressStage::Compressing,
-                                    completed_in_file, progress_total_bytes,
-                                    0, progress_total_files, src.name);
+                                    progress_completed_bytes + completed_in_file,
+                                    progress_total_bytes, progress_completed_files,
+                                    progress_total_files, src.name);
                 };
             }
-            payload.compressed = deflate_parallel(payload.mapped->data(),
-                                                  static_cast<size_t>(payload.mapped->size()),
-                                                  deflate, pool);
+            payload.compressed = deflate(payload.mapped->data(),
+                                         static_cast<size_t>(payload.mapped->size()),
+                                         deflate_options);
             if (always_deflate || payload.compressed.bytes.size() < payload.mapped->size()) {
                 payload.actual_method = kMethodDeflate;
                 payload.compressed_size = payload.compressed.bytes.size();
@@ -1562,23 +1557,6 @@ void create_zip(const std::filesystem::path& output,
         return payload;
     };
 
-    std::vector<std::future<PreparedPayload>> prepared(entries.size());
-    size_t next_to_schedule = 0;
-    size_t in_flight = 0;
-    const size_t preparation_window = std::max<size_t>(1, thread_count);
-    auto schedule_more = [&]() {
-        while (next_to_schedule < entries.size() && in_flight < preparation_window) {
-            throw_if_cancelled(options.cancel);
-            const size_t index = next_to_schedule++;
-            if (entries[index].directory) continue;
-            prepared[index] = std::async(std::launch::async, [&, index]() {
-                return prepare_file(index);
-            });
-            ++in_flight;
-        }
-    };
-    schedule_more();
-
     for (size_t entry_index = 0; entry_index < entries.size(); ++entry_index) {
         throw_if_cancelled(options.cancel);
         const SourceEntry& src = entries[entry_index];
@@ -1598,9 +1576,7 @@ void create_zip(const std::filesystem::path& output,
         PreparedPayload payload;
 
         if (!src.directory) {
-            payload = prepared[entry_index].get();
-            --in_flight;
-            schedule_more();
+            payload = prepare_file(entry_index);
             e.crc32 = payload.crc32;
             e.actual_method = payload.actual_method;
             e.encrypted = payload.encrypted;
@@ -1831,12 +1807,9 @@ void extract_zip(const std::filesystem::path& archive,
         }
     }
 
-    // Create the directory tree before starting workers. Each file is decoded
-    // into an exclusive temporary mapping and is installed only after every
-    // entry has passed its CRC check. This keeps the hot path contiguous while
-    // preventing a corrupt late entry from exposing partially verified files.
-    std::vector<size_t> file_indices;
-    file_indices.reserve(static_cast<size_t>(progress_total_files));
+    // Each file is decoded into an exclusive temporary mapping and is installed
+    // only after every entry has passed its CRC check. This prevents a corrupt
+    // late entry from exposing partially verified files.
     for (size_t index = 0; index < prepared.size(); ++index) {
         throw_if_cancelled(options.cancel);
         const auto& item = prepared[index];
@@ -1851,14 +1824,8 @@ void extract_zip(const std::filesystem::path& archive,
             if (ec)
                 throw std::runtime_error("Cannot create parent directory: " +
                                          path_to_utf8(item.target.parent_path()));
-            file_indices.push_back(index);
         }
     }
-    std::stable_sort(file_indices.begin(), file_indices.end(),
-        [&](size_t left, size_t right) {
-            return prepared[left].entry->uncompressed_size >
-                   prepared[right].entry->uncompressed_size;
-        });
 
     struct PendingExtraction {
         const PreparedEntry* item = nullptr;
@@ -1867,265 +1834,127 @@ void extract_zip(const std::filesystem::path& archive,
         InflateResult result;
     };
 
-    std::atomic<uint64_t> extracted_bytes{0};
+    uint64_t extracted_bytes = 0;
     uint64_t extracted_files = 0;
-    std::atomic<size_t> active_entry{std::numeric_limits<size_t>::max()};
-    std::atomic<bool> stop_requested{false};
-    std::mutex worker_error_mutex;
-    std::exception_ptr worker_error;
-
-    auto check_worker_stop = [&]() {
-        if (stop_requested.load(std::memory_order_relaxed))
-            throw OperationCancelled();
-    };
-    auto record_worker_error = [&](std::exception_ptr error) {
-        std::lock_guard<std::mutex> lock(worker_error_mutex);
-        if (!worker_error) worker_error = std::move(error);
-    };
-    auto add_progress = [&](uint64_t amount, size_t entry_index) {
-        check_worker_stop();
-        active_entry.store(entry_index, std::memory_order_relaxed);
-        extracted_bytes.fetch_add(amount, std::memory_order_relaxed);
-    };
-
-    const size_t worker_count = std::min<size_t>({
-        std::max<size_t>(1, options.thread_count),
-        std::max<size_t>(1, file_indices.size()),
-        size_t{256}
-    });
-
-    // CompletionGuard instances run on worker threads and retain pointers to
-    // these objects. Declare the synchronization state before the pool and
-    // futures so reverse destruction order joins workers before any callback
-    // can touch the state during an exceptional unwind.
-    std::mutex completion_mutex;
-    std::condition_variable completion_condition;
-    std::vector<size_t> completion_indices(file_indices.size());
-    size_t completion_count = 0;
-    struct CompletionGuard {
-        size_t future_index;
-        std::mutex* mutex;
-        std::condition_variable* condition;
-        std::vector<size_t>* indices;
-        size_t* count;
-        ~CompletionGuard() {
-            {
-                std::lock_guard<std::mutex> lock(*mutex);
-                (*indices)[(*count)++] = future_index;
-            }
-            condition->notify_one();
-        }
-    };
-
-    std::unique_ptr<ThreadPool> extraction_pool;
-    if (!file_indices.empty())
-        extraction_pool = std::make_unique<ThreadPool>(worker_count);
-    std::vector<std::pair<size_t, std::future<std::unique_ptr<PendingExtraction>>>> futures;
-    futures.reserve(file_indices.size());
-
-    for (const size_t index : file_indices) {
-        const size_t future_index = futures.size();
-        futures.emplace_back(index, extraction_pool->submit([&, index, future_index]() {
-            CompletionGuard completion{
-                future_index, &completion_mutex, &completion_condition,
-                &completion_indices, &completion_count
-            };
-            const auto& item = prepared[index];
-            const auto& entry = *item.entry;
-            try {
-                check_worker_stop();
-                if (entry.compressed_size >
-                    static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
-                    entry.uncompressed_size >
-                    static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                    throw std::runtime_error("ZIP entry is too large for this process");
-                }
-
-                const uint8_t* compressed = checked_bytes(
-                    mapped.data(), mapped.size(), entry.data_offset,
-                    entry.compressed_size, "ZIP entry payload");
-                size_t compressed_size = static_cast<size_t>(entry.compressed_size);
-                std::vector<uint8_t> decrypted;
-                if (entry.aes) {
-                    decrypted = winzip_aes256_decrypt(
-                        compressed, compressed_size, options.password, aesni);
-                    check_worker_stop();
-                    compressed = decrypted.data();
-                    compressed_size = decrypted.size();
-                }
-
-                std::error_code worker_ec;
-                for (auto parent = item.target.parent_path();
-                     path_is_within(output_root, parent);
-                     parent = parent.parent_path()) {
-                    const auto parent_status =
-                        extraction_path_status(parent, worker_ec);
-                    if (worker_ec ||
-                        !std::filesystem::is_directory(parent_status) ||
-                        std::filesystem::is_symlink(parent_status)) {
-                        throw std::runtime_error(
-                            "Extraction parent changed or is not a directory: " +
-                            path_to_utf8(parent));
-                    }
-                    if (parent == output_root) break;
-                }
-
-                auto pending = std::make_unique<PendingExtraction>();
-                pending->item = &item;
-                pending->temporary = make_temporary_path(item.target);
-                pending->guard = std::make_unique<TemporaryFileGuard>(
-                    pending->temporary, false);
-
-                uint64_t reported_in_file = 0;
-                const std::function<void(uint64_t)> file_progress =
-                    [&](uint64_t completed_in_file) {
-                    if (completed_in_file < reported_in_file ||
-                        completed_in_file > entry.uncompressed_size) {
-                        throw std::runtime_error("Invalid extraction progress");
-                    }
-                    const uint64_t delta = completed_in_file - reported_in_file;
-                    reported_in_file = completed_in_file;
-                    add_progress(delta, index);
-                };
-
-                {
-                    check_worker_stop();
-                    WritableMappedFile output(pending->temporary,
-                                              entry.uncompressed_size);
-                    pending->guard->activate();
-                    if (entry.actual_method == kMethodStore) {
-                        if (compressed_size != entry.uncompressed_size)
-                            throw std::runtime_error(
-                                "Stored entry size does not match the ZIP directory");
-                        Crc32 crc;
-                        constexpr size_t kStoredCopyChunk = 4u * 1024u * 1024u;
-                        size_t copied = 0;
-                        while (copied != compressed_size) {
-                            const size_t amount = std::min(
-                                kStoredCopyChunk, compressed_size - copied);
-                            std::memcpy(output.data() + copied,
-                                        compressed + copied, amount);
-                            crc.update(compressed + copied, amount);
-                            copied += amount;
-                            file_progress(copied);
-                        }
-                        pending->result = {
-                            entry.uncompressed_size,
-                            crc.value()
-                        };
-                    } else {
-                        pending->result = inflate_raw_to_buffer(
-                            compressed, compressed_size, entry.uncompressed_size,
-                            output.data(), file_progress);
-                    }
-                    check_worker_stop();
-                    if ((!entry.aes || entry.aes_version == 1) &&
-                        pending->result.crc32 != entry.crc32) {
-                        throw std::runtime_error("CRC-32 verification failed");
-                    }
-                    output.flush();
-                }
-
-                if (reported_in_file != pending->result.size) {
-                    add_progress(pending->result.size - reported_in_file, index);
-                }
-                return pending;
-            } catch (const OperationCancelled&) {
-                stop_requested.store(true, std::memory_order_relaxed);
-                throw;
-            } catch (const std::exception& error) {
-                stop_requested.store(true, std::memory_order_relaxed);
-                auto wrapped = std::make_exception_ptr(std::runtime_error(
-                    "Failed to extract " + entry.name + ": " + error.what()));
-                record_worker_error(wrapped);
-                std::rethrow_exception(wrapped);
-            } catch (...) {
-                stop_requested.store(true, std::memory_order_relaxed);
-                record_worker_error(std::current_exception());
-                throw;
-            }
-        }));
-    }
-
     std::vector<std::unique_ptr<PendingExtraction>> pending(prepared.size());
-    size_t consumed_completions = 0;
-    std::exception_ptr control_error;
-    std::exception_ptr future_error;
-    uint64_t last_reported_bytes = 0;
-    auto next_progress_report = std::chrono::steady_clock::now();
-    while (consumed_completions != futures.size()) {
-        size_t completed_future = std::numeric_limits<size_t>::max();
-        {
-            std::unique_lock<std::mutex> lock(completion_mutex);
-            completion_condition.wait_for(lock, std::chrono::milliseconds(5), [&]() {
-                return consumed_completions != completion_count;
-            });
-            if (consumed_completions != completion_count) {
-                completed_future = completion_indices[consumed_completions++];
-            }
-        }
-        if (completed_future != std::numeric_limits<size_t>::max()) {
-            try {
-                pending[futures[completed_future].first] =
-                    futures[completed_future].second.get();
-            } catch (...) {
-                // The worker records the original contextual error before it
-                // requests a cooperative stop. Cancellation exceptions from
-                // sibling workers are intentionally ignored here.
-                if (!future_error) future_error = std::current_exception();
-            }
-        }
+    for (size_t index = 0; index < prepared.size(); ++index) {
+        const auto& item = prepared[index];
+        const auto& entry = *item.entry;
+        if (entry.directory) continue;
 
-        const auto now = std::chrono::steady_clock::now();
-        if (!control_error && !stop_requested.load(std::memory_order_relaxed)) {
-            try {
-                if (options.cancel && options.cancel()) {
-                    control_error = std::make_exception_ptr(OperationCancelled());
-                    stop_requested.store(true, std::memory_order_relaxed);
-                }
-            } catch (...) {
-                control_error = std::current_exception();
-                stop_requested.store(true, std::memory_order_relaxed);
+        try {
+            throw_if_cancelled(options.cancel);
+            if (entry.compressed_size >
+                static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+                entry.uncompressed_size >
+                static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                throw std::runtime_error("ZIP entry is too large for this process");
             }
-        }
-        if (!control_error && !stop_requested.load(std::memory_order_relaxed) &&
-            options.progress && now >= next_progress_report) {
-            const uint64_t completed =
-                extracted_bytes.load(std::memory_order_relaxed);
-            if (completed != last_reported_bytes) {
-                const size_t current =
-                    active_entry.load(std::memory_order_relaxed);
-                try {
-                    report_progress(options.progress, ProgressStage::Extracting,
-                                    completed, progress_total_bytes,
-                                    extracted_files, progress_total_files,
-                                    current < prepared.size() ?
-                                        prepared[current].entry->name :
-                                        std::string{});
-                    last_reported_bytes = completed;
-                } catch (...) {
-                    control_error = std::current_exception();
-                    stop_requested.store(true, std::memory_order_relaxed);
-                }
+
+            const uint8_t* compressed = checked_bytes(
+                mapped.data(), mapped.size(), entry.data_offset,
+                entry.compressed_size, "ZIP entry payload");
+            size_t compressed_size = static_cast<size_t>(entry.compressed_size);
+            std::vector<uint8_t> decrypted;
+            if (entry.aes) {
+                decrypted = winzip_aes256_decrypt(
+                    compressed, compressed_size, options.password, aesni);
+                throw_if_cancelled(options.cancel);
+                compressed = decrypted.data();
+                compressed_size = decrypted.size();
             }
-            next_progress_report = now + std::chrono::milliseconds(50);
+
+            std::error_code extraction_ec;
+            for (auto parent = item.target.parent_path();
+                 path_is_within(output_root, parent);
+                 parent = parent.parent_path()) {
+                const auto parent_status =
+                    extraction_path_status(parent, extraction_ec);
+                if (extraction_ec ||
+                    !std::filesystem::is_directory(parent_status) ||
+                    std::filesystem::is_symlink(parent_status)) {
+                    throw std::runtime_error(
+                        "Extraction parent changed or is not a directory: " +
+                        path_to_utf8(parent));
+                }
+                if (parent == output_root) break;
+            }
+
+            auto extracted = std::make_unique<PendingExtraction>();
+            extracted->item = &item;
+            extracted->temporary = make_temporary_path(item.target);
+            extracted->guard = std::make_unique<TemporaryFileGuard>(
+                extracted->temporary, false);
+
+            uint64_t reported_in_file = 0;
+            const std::function<void(uint64_t)> file_progress =
+                [&](uint64_t completed_in_file) {
+                throw_if_cancelled(options.cancel);
+                if (completed_in_file < reported_in_file ||
+                    completed_in_file > entry.uncompressed_size) {
+                    throw std::runtime_error("Invalid extraction progress");
+                }
+                extracted_bytes += completed_in_file - reported_in_file;
+                reported_in_file = completed_in_file;
+                report_progress(options.progress, ProgressStage::Extracting,
+                                extracted_bytes, progress_total_bytes,
+                                extracted_files, progress_total_files, entry.name);
+            };
+
+            {
+                throw_if_cancelled(options.cancel);
+                WritableMappedFile output(extracted->temporary,
+                                          entry.uncompressed_size);
+                extracted->guard->activate();
+                if (entry.actual_method == kMethodStore) {
+                    if (compressed_size != entry.uncompressed_size)
+                        throw std::runtime_error(
+                            "Stored entry size does not match the ZIP directory");
+                    Crc32 crc;
+                    constexpr size_t kStoredCopyChunk = 4u * 1024u * 1024u;
+                    size_t copied = 0;
+                    while (copied != compressed_size) {
+                        throw_if_cancelled(options.cancel);
+                        const size_t amount = std::min(
+                            kStoredCopyChunk, compressed_size - copied);
+                        std::memcpy(output.data() + copied,
+                                    compressed + copied, amount);
+                        crc.update(compressed + copied, amount);
+                        copied += amount;
+                        file_progress(copied);
+                    }
+                    extracted->result = {entry.uncompressed_size, crc.value()};
+                } else {
+                    extracted->result = inflate_raw_to_buffer(
+                        compressed, compressed_size, entry.uncompressed_size,
+                        output.data(), file_progress);
+                }
+                throw_if_cancelled(options.cancel);
+                if ((!entry.aes || entry.aes_version == 1) &&
+                    extracted->result.crc32 != entry.crc32) {
+                    throw std::runtime_error("CRC-32 verification failed");
+                }
+                output.flush();
+            }
+
+            if (reported_in_file != extracted->result.size)
+                file_progress(extracted->result.size);
+            pending[index] = std::move(extracted);
+        } catch (const OperationCancelled&) {
+            throw;
+        } catch (const std::exception& error) {
+            throw std::runtime_error(
+                "Failed to extract " + entry.name + ": " + error.what());
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(worker_error_mutex);
-        if (worker_error) std::rethrow_exception(worker_error);
-    }
-    if (control_error) std::rethrow_exception(control_error);
-    if (future_error) std::rethrow_exception(future_error);
-
-    if (extracted_bytes.load(std::memory_order_relaxed) != progress_total_bytes) {
+    if (extracted_bytes != progress_total_bytes) {
         throw std::runtime_error("ZIP extraction progress totals do not match the directory");
     }
 
     // Revalidate the path immediately before the atomic install. In
     // particular, reject a symlink or non-regular target that appeared while
-    // worker threads were decoding.
+    // later entries were being decoded.
     for (size_t index = 0; index < prepared.size(); ++index) {
         const auto& item = prepared[index];
         const auto& entry = *item.entry;
@@ -2161,7 +1990,7 @@ void extract_zip(const std::filesystem::path& archive,
         set_dos_timestamp(item.target, entry.dos_date, entry.dos_time);
         ++extracted_files;
         report_progress(options.progress, ProgressStage::Extracting,
-                        extracted_bytes.load(std::memory_order_relaxed),
+                        extracted_bytes,
                         progress_total_bytes, extracted_files,
                         progress_total_files, entry.name);
         if (options.verbose) {
@@ -2173,8 +2002,7 @@ void extract_zip(const std::filesystem::path& archive,
         }
     }
 
-    const uint64_t final_extracted_bytes =
-        extracted_bytes.load(std::memory_order_relaxed);
+    const uint64_t final_extracted_bytes = extracted_bytes;
     const uint64_t final_extracted_files = extracted_files;
     report_progress(options.progress, ProgressStage::Extracting,
                     final_extracted_bytes, progress_total_bytes,

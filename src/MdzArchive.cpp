@@ -1,9 +1,9 @@
 #include "MdzArchive.h"
 
 #include "Json.h"
-#include "mdz_zip/crc32.h"
-#include "mdz_zip/deflate_decoder.h"
-#include "mdz_zip/mzip_codec.h"
+#include "libmzip/crc32.h"
+#include "libmzip/deflate_decoder.h"
+#include "libmzip/mzip_codec.h"
 
 #include <algorithm>
 #include <array>
@@ -109,7 +109,11 @@ std::size_t FindEndRecord(std::string_view bytes) {
 std::pair<std::uint16_t, std::uint16_t> CurrentDosTime() {
     const std::time_t now = std::time(nullptr);
     std::tm local{};
+#ifdef _WIN32
     localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
     const int year = (std::max)(1980, local.tm_year + 1900);
     const std::uint16_t date = static_cast<std::uint16_t>(
         ((year - 1980) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);

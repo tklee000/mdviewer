@@ -1,7 +1,6 @@
 #pragma once
 #include "common.h"
 #include "match.h"
-#include "thread_pool.h"
 
 namespace fz {
 
@@ -18,9 +17,8 @@ struct DeflateResult {
     uint64_t bit_count = 0;
 };
 
-DeflateResult deflate_parallel(const uint8_t* data,
-                               size_t size,
-                               const DeflateOptions& options,
-                               ThreadPool& pool);
+DeflateResult deflate(const uint8_t* data,
+                      size_t size,
+                      const DeflateOptions& options);
 
 } // namespace fz

@@ -59,6 +59,7 @@
       Number(localStorage.getItem("mdviewer.splitRatio")) || 50)),
     previewChanged: false,
     googleDriveBusy: false,
+    googleDriveAvailable: true,
     applying: false
   };
   let previewSelectionRange = null;
@@ -78,6 +79,16 @@
   let pdfPreviewTimer = 0;
   let pdfPreviewSequence = 0;
   let activePdfPreviewRequest = 0;
+  let pdfDialogMode = "export";
+  let pdfPreviewFrameLoaded = false;
+  let pdfPreviewState = "loading";
+  let pdfPrintersReady = false;
+  let pdfPrintBusy = false;
+  let pdfPrinterPropertiesBusy = false;
+  let advancedSettingsPrinterName = "";
+  let preferredPrinterName = "";
+  let docxExportBusy = false;
+  let hwpxExportBusy = false;
   const splitMinimumWidth = 860;
 
   function activeEditorMode() {
@@ -218,7 +229,79 @@
     }
   }
 
+  function readStoredPrintSettings() {
+    const defaults = {
+      pageMode: "all", pageRange: "", printerName: "", copies: 1
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem("mdviewer.printSettings") || "null");
+      if (!stored || typeof stored !== "object") return defaults;
+      return {
+        pageMode: stored.pageMode === "custom" ? "custom" : "all",
+        pageRange: typeof stored.pageRange === "string"
+          ? stored.pageRange.slice(0, 128) : "",
+        printerName: typeof stored.printerName === "string"
+          ? stored.printerName.slice(0, 1024) : "",
+        copies: Number.isInteger(Number(stored.copies)) &&
+          Number(stored.copies) >= 1 && Number(stored.copies) <= 999
+          ? Number(stored.copies) : 1
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function normalizePdfPageRange(value) {
+    const text = String(value || "").trim();
+    if (!text || text.length > 128) return null;
+    const normalized = [];
+    for (const rawPart of text.split(",")) {
+      const part = rawPart.trim();
+      const match = part.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+      if (!match) return null;
+      const start = Number(match[1]);
+      const end = match[2] ? Number(match[2]) : null;
+      if (!Number.isSafeInteger(start) || start < 1 || start > 1000000 ||
+          (end !== null && (!Number.isSafeInteger(end) || end < start ||
+            end > 1000000))) return null;
+      normalized.push(end === null ? String(start) : `${start}-${end}`);
+    }
+    return normalized.join(",");
+  }
+
+  function printPageSettingsFromControls() {
+    const pageMode = $('input[name="pdf-print-pages"]:checked')?.value === "custom"
+      ? "custom" : "all";
+    const rawPageRange = $("#pdf-page-range-input").value;
+    return {
+      pageMode,
+      rawPageRange,
+      pageRange: pageMode === "custom" ? normalizePdfPageRange(rawPageRange) : ""
+    };
+  }
+
+  function printDeviceSettingsFromControls() {
+    const copies = Number($("#pdf-print-copies").value);
+    return {
+      printerName: $("#pdf-printer-select").value || "",
+      copies: Number.isInteger(copies) && copies >= 1 && copies <= 999
+        ? copies : null
+    };
+  }
+
+  function storePrintSettings() {
+    const pages = printPageSettingsFromControls();
+    const device = printDeviceSettingsFromControls();
+    localStorage.setItem("mdviewer.printSettings", JSON.stringify({
+      pageMode: pages.pageMode,
+      pageRange: pages.rawPageRange,
+      printerName: device.printerName || preferredPrinterName,
+      copies: device.copies || 1
+    }));
+  }
+
   function pdfSettingsFromControls() {
+    const printPages = printPageSettingsFromControls();
     return {
       paper: ["a4", "letter"].includes($("#pdf-paper-select").value)
         ? $("#pdf-paper-select").value : "a4",
@@ -227,7 +310,9 @@
       marginMm: [0, 10, 20].includes(Number($("#pdf-margin-select").value))
         ? Number($("#pdf-margin-select").value) : 20,
       pageNumbers: $("#pdf-page-numbers").checked,
-      printBackground: $("#pdf-print-background").checked
+      printBackground: $("#pdf-print-background").checked,
+      pageRanges: pdfDialogMode === "print" && printPages.pageMode === "custom"
+        ? printPages.pageRange : ""
     };
   }
 
@@ -241,14 +326,138 @@
     updatePdfPaperSummary();
   }
 
+  function applyPrintSettingsToControls(settings) {
+    const mode = settings.pageMode === "custom" ? "custom" : "all";
+    const radio = $(`input[name="pdf-print-pages"][value="${mode}"]`);
+    if (radio) radio.checked = true;
+    $("#pdf-page-range-input").value = settings.pageRange || "";
+    $("#pdf-print-copies").value = String(settings.copies || 1);
+    preferredPrinterName = settings.printerName || "";
+    updatePrintPageRangeControls();
+    updatePdfPaperSummary();
+  }
+
+  function updatePrintPageRangeControls() {
+    const settings = printPageSettingsFromControls();
+    const input = $("#pdf-page-range-input");
+    input.disabled = settings.pageMode !== "custom";
+    const invalid = settings.pageMode === "custom" && settings.pageRange === null;
+    input.setAttribute("aria-invalid", invalid ? "true" : "false");
+    $("#pdf-page-range-error").hidden = !invalid;
+    return !invalid;
+  }
+
+  function validPrintDeviceSelection() {
+    const device = printDeviceSettingsFromControls();
+    $("#pdf-print-copies").setAttribute(
+      "aria-invalid", device.copies === null ? "true" : "false");
+    return pdfPrintersReady && Boolean(device.printerName) &&
+      device.copies !== null;
+  }
+
+  function updatePdfActionAvailability() {
+    $("#pdf-export-save").disabled = pdfPrintBusy || pdfPrinterPropertiesBusy ||
+      pdfPreviewState !== "ready" ||
+      (pdfDialogMode === "print" &&
+        (!pdfPreviewFrameLoaded || !validPrintDeviceSelection()));
+  }
+
+  function setPdfPrintBusy(busy) {
+    pdfPrintBusy = busy;
+    $$('[data-pdf-export-cancel]').forEach((button) => {
+      button.disabled = busy;
+    });
+    $("#pdf-printer-select").disabled = busy || pdfPrinterPropertiesBusy ||
+      !pdfPrintersReady;
+    $("#pdf-print-copies").disabled = busy || pdfPrinterPropertiesBusy;
+    updatePrinterPropertiesAvailability();
+    updatePdfActionAvailability();
+  }
+
+  function showPrinterPropertiesStatus(message, state = "") {
+    const status = $("#pdf-printer-properties-status");
+    status.textContent = message || "";
+    status.dataset.state = state;
+    status.hidden = !message;
+  }
+
+  function updatePrinterPropertiesAvailability() {
+    const selected = $("#pdf-printer-select").value || "";
+    $("#pdf-printer-properties").disabled = pdfPrintBusy ||
+      pdfPrinterPropertiesBusy || !pdfPrintersReady || !selected;
+    if (!pdfPrinterPropertiesBusy) {
+      showPrinterPropertiesStatus(
+        advancedSettingsPrinterName && advancedSettingsPrinterName === selected
+          ? i18n.t("Advanced printer settings applied") : "",
+        advancedSettingsPrinterName === selected ? "applied" : "");
+    }
+  }
+
+  function setPrinterPropertiesBusy(busy) {
+    pdfPrinterPropertiesBusy = busy;
+    $("#pdf-printer-select").disabled = busy || pdfPrintBusy || !pdfPrintersReady;
+    $("#pdf-print-copies").disabled = busy || pdfPrintBusy;
+    if (busy) {
+      showPrinterPropertiesStatus(i18n.t("Opening printer settings…"));
+    }
+    updatePrinterPropertiesAvailability();
+    updatePdfActionAvailability();
+  }
+
+  function requestPrinterList() {
+    pdfPrintersReady = false;
+    advancedSettingsPrinterName = "";
+    const select = $("#pdf-printer-select");
+    select.disabled = true;
+    $("#pdf-printer-properties").disabled = true;
+    showPrinterPropertiesStatus("");
+    select.replaceChildren(new Option(i18n.t("Loading printers…"), ""));
+    $("#pdf-printer-status").hidden = true;
+    updatePdfActionAvailability();
+    if (!post("printer.list")) {
+      select.replaceChildren(new Option(i18n.t("No printers available"), ""));
+      $("#pdf-printer-status").textContent = i18n.t("No printers available");
+      $("#pdf-printer-status").hidden = false;
+    }
+  }
+
+  function applyPrinterList(entries) {
+    if (pdfDialogMode !== "print" || !$("#pdf-export-dialog").open) return;
+    const printers = Array.isArray(entries) ? entries.filter((entry) =>
+      entry && typeof entry.name === "string" && entry.name &&
+      entry.name.length <= 1024) : [];
+    const select = $("#pdf-printer-select");
+    select.replaceChildren();
+    printers.forEach((entry) => select.add(new Option(entry.name, entry.name)));
+    const preferred = printers.find((entry) => entry.name === preferredPrinterName) ||
+      printers.find((entry) => entry.isDefault) || printers[0];
+    if (preferred) select.value = preferred.name;
+    pdfPrintersReady = printers.length > 0;
+    select.disabled = !pdfPrintersReady || pdfPrintBusy;
+    $("#pdf-printer-status").textContent = pdfPrintersReady
+      ? "" : i18n.t("No printers available");
+    $("#pdf-printer-status").hidden = pdfPrintersReady;
+    if (preferred) preferredPrinterName = preferred.name;
+    storePrintSettings();
+    updatePrinterPropertiesAvailability();
+    updatePdfActionAvailability();
+  }
+
   function updatePdfPaperSummary() {
     const settings = pdfSettingsFromControls();
     const paper = settings.paper === "letter" ? "Letter" : "A4";
     const orientation = i18n.t(settings.orientation === "landscape"
       ? "Landscape" : "Portrait");
-    $("#pdf-paper-summary").textContent = i18n.t(
+    let summary = i18n.t(
       "{paper} · {orientation} · {margin} mm margins",
       { paper, orientation, margin: settings.marginMm });
+    if (pdfDialogMode === "print") {
+      const pages = printPageSettingsFromControls();
+      summary += pages.pageMode === "custom" && pages.pageRange
+        ? ` · ${i18n.t("Pages {range}", { range: pages.pageRange })}`
+        : ` · ${i18n.t("All pages")}`;
+    }
+    $("#pdf-paper-summary").textContent = summary;
   }
 
   function synchronizeDocumentForPdf() {
@@ -282,10 +491,11 @@
   }
 
   function showPdfPreviewState(kind) {
+    pdfPreviewState = kind;
     $("#pdf-preview-loading").hidden = kind !== "loading";
     $("#pdf-preview-error").hidden = kind !== "error";
     $("#pdf-preview-frame").hidden = kind !== "ready";
-    $("#pdf-export-save").disabled = kind !== "ready";
+    updatePdfActionAvailability();
     $("#pdf-export-status").textContent = i18n.t(
       kind === "ready" ? "Preview ready" :
       kind === "error" ? "Preview unavailable" : "Creating print preview…");
@@ -296,8 +506,21 @@
     if (!dialog.open) return;
     const requestId = ++pdfPreviewSequence;
     activePdfPreviewRequest = requestId;
+    if (pdfDialogMode === "print" && !updatePrintPageRangeControls()) {
+      pdfPreviewState = "rangeError";
+      $("#pdf-preview-loading").hidden = true;
+      $("#pdf-preview-error").hidden = true;
+      $("#pdf-preview-frame").hidden = true;
+      $("#pdf-export-save").disabled = true;
+      $("#pdf-export-status").textContent = i18n.t("Enter a valid page range");
+      updatePdfPaperSummary();
+      return;
+    }
     const settings = pdfSettingsFromControls();
     localStorage.setItem("mdviewer.pdfSettings", JSON.stringify(settings));
+    if (pdfDialogMode === "print") {
+      storePrintSettings();
+    }
     document.documentElement.style.setProperty(
       "--pdf-page-margin", `${settings.marginMm}mm`);
     document.documentElement.style.setProperty(
@@ -319,23 +542,848 @@
     pdfPreviewTimer = setTimeout(() => requestPdfPreview(), delay);
   }
 
-  function openPdfExportDialog() {
+  function openPdfDialog(mode) {
     const dialog = $("#pdf-export-dialog");
     if (dialog.open) return;
+    pdfDialogMode = mode === "print" ? "print" : "export";
+    pdfPreviewFrameLoaded = false;
+    pdfPreviewState = "loading";
+    pdfPrintersReady = false;
+    pdfPrinterPropertiesBusy = false;
+    advancedSettingsPrinterName = "";
+    setPdfPrintBusy(false);
+    const printing = pdfDialogMode === "print";
+    $("[data-export-format-field]").hidden = printing;
+    if (!printing) setExportFormatSelection("pdf");
+    $("#pdf-export-dialog-title").textContent = i18n.t(printing ? "Print" : "Export PDF");
+    $("#pdf-export-dialog-title").nextElementSibling.textContent = i18n.t(printing
+      ? "Choose a printer, copies, and pages, then review before printing."
+      : "Review the final pages before saving.");
+    $("#pdf-page-range-settings").hidden = !printing;
+    $("#pdf-printer-settings").hidden = !printing;
+    $("#pdf-export-save").textContent = i18n.t(printing ? "Print…" : "Save PDF");
     applyPdfSettingsToControls(readStoredPdfSettings());
+    applyPrintSettingsToControls(readStoredPrintSettings());
     $("#pdf-preview-frame").removeAttribute("src");
     dialog.showModal();
+    if (printing) requestPrinterList();
     schedulePdfPreview(0);
+  }
+
+  function openPdfExportDialog() { openPdfDialog("export"); }
+  function openPrintDialog() { openPdfDialog("print"); }
+
+  function normalizedExportFormat(value) {
+    return ["pdf", "docx", "hwpx"].includes(value) ? value : "pdf";
+  }
+
+  function storedExportFormat() {
+    return normalizedExportFormat(localStorage.getItem("mdviewer.exportFormat"));
+  }
+
+  function setExportFormatSelection(format) {
+    const normalized = normalizedExportFormat(format);
+    localStorage.setItem("mdviewer.exportFormat", normalized);
+    $$('[data-export-format-select]').forEach((select) => {
+      select.value = normalized;
+    });
+    return normalized;
+  }
+
+  function openExportDialog(format = storedExportFormat()) {
+    const normalized = setExportFormatSelection(format);
+    if (normalized === "docx") openDocxExportDialog();
+    else if (normalized === "hwpx") openHwpxExportDialog();
+    else openPdfExportDialog();
+  }
+
+  function switchExportFormat(format) {
+    const normalized = normalizedExportFormat(format);
+    const current = $("#pdf-export-dialog").open && pdfDialogMode === "export"
+      ? "pdf" : $("#docx-export-dialog").open
+        ? "docx" : $("#hwpx-export-dialog").open ? "hwpx" : null;
+    if (current === normalized) {
+      setExportFormatSelection(normalized);
+      return;
+    }
+    if (docxExportBusy || hwpxExportBusy) {
+      if (current) setExportFormatSelection(current);
+      return;
+    }
+    if (current === "pdf") closePdfExportDialog();
+    else if (current === "docx") closeDocxExportDialog();
+    else if (current === "hwpx") closeHwpxExportDialog();
+    openExportDialog(normalized);
   }
 
   function closePdfExportDialog() {
     const dialog = $("#pdf-export-dialog");
-    if (!dialog.open) return;
+    if (!dialog.open || pdfPrintBusy) return;
     clearTimeout(pdfPreviewTimer);
     activePdfPreviewRequest = ++pdfPreviewSequence;
+    pdfPreviewFrameLoaded = false;
     $("#pdf-preview-frame").removeAttribute("src");
     dialog.close("cancel");
     post("pdf.previewClose");
+  }
+
+  function readStoredDocxSettings() {
+    const defaults = {
+      paper: "a4", orientation: "portrait", marginMm: 20,
+      font: "sans", includeImages: true, author: ""
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem("mdviewer.docxSettings") || "null");
+      if (!stored || typeof stored !== "object") return defaults;
+      return {
+        paper: ["a4", "letter"].includes(stored.paper) ? stored.paper : defaults.paper,
+        orientation: ["portrait", "landscape"].includes(stored.orientation)
+          ? stored.orientation : defaults.orientation,
+        marginMm: [0, 10, 20].includes(Number(stored.marginMm))
+          ? Number(stored.marginMm) : defaults.marginMm,
+        font: ["serif", "sans"].includes(stored.font) ? stored.font : defaults.font,
+        includeImages: stored.includeImages !== false,
+        author: typeof stored.author === "string" ? stored.author.slice(0, 120) : ""
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function docxSettingsFromControls() {
+    return {
+      paper: ["a4", "letter"].includes($("#docx-paper-select").value)
+        ? $("#docx-paper-select").value : "a4",
+      orientation: $('input[name="docx-orientation"]:checked')?.value === "landscape"
+        ? "landscape" : "portrait",
+      marginMm: [0, 10, 20].includes(Number($("#docx-margin-select").value))
+        ? Number($("#docx-margin-select").value) : 20,
+      font: $("#docx-font-select").value === "serif" ? "serif" : "sans",
+      includeImages: $("#docx-include-images").checked,
+      title: $("#docx-title-input").value.trim().slice(0, 240),
+      author: $("#docx-author-input").value.trim().slice(0, 120)
+    };
+  }
+
+  function updateDocxSummary() {
+    const settings = docxSettingsFromControls();
+    const paper = settings.paper === "letter" ? "Letter" : "A4";
+    const orientation = i18n.t(settings.orientation === "landscape"
+      ? "Landscape" : "Portrait");
+    $("#docx-layout-summary").textContent = i18n.t(
+      "{paper} · {orientation} · {margin} mm margins",
+      { paper, orientation, margin: settings.marginMm });
+  }
+
+  function applyDocxSettingsToControls(settings) {
+    $("#docx-paper-select").value = settings.paper;
+    const orientation = $(`input[name="docx-orientation"][value="${settings.orientation}"]`);
+    if (orientation) orientation.checked = true;
+    $("#docx-margin-select").value = String(settings.marginMm);
+    $("#docx-font-select").value = settings.font;
+    $("#docx-include-images").checked = settings.includeImages;
+    $("#docx-author-input").value = settings.author;
+    const stem = (state.name || i18n.t("Untitled")).replace(/\.[^.]+$/, "");
+    $("#docx-title-input").value = stem;
+    updateDocxSummary();
+  }
+
+  function updateDocxContentPreview() {
+    const preview = $("#docx-document-preview");
+    const clone = previewEditor.cloneNode(true);
+    clone.removeAttribute("id");
+    clone.removeAttribute("contenteditable");
+    clone.querySelectorAll("[contenteditable]").forEach((element) =>
+      element.removeAttribute("contenteditable"));
+    clone.querySelectorAll("input").forEach((input) => { input.disabled = true; });
+    preview.replaceChildren(...clone.childNodes);
+    preview.style.fontFamily = $("#docx-font-select").value === "serif"
+      ? 'Batang, "Times New Roman", serif'
+      : '"Malgun Gothic", "Segoe UI", sans-serif';
+  }
+
+  function openDocxExportDialog() {
+    const dialog = $("#docx-export-dialog");
+    if (dialog.open) return;
+    setExportFormatSelection("docx");
+    synchronizeDocumentForPdf();
+    applyDocxSettingsToControls(readStoredDocxSettings());
+    updateDocxContentPreview();
+    docxExportBusy = false;
+    $("#docx-export-save").disabled = false;
+    $("#docx-export-status").textContent = i18n.t("Ready to export");
+    dialog.showModal();
+  }
+
+  function closeDocxExportDialog() {
+    const dialog = $("#docx-export-dialog");
+    if (!dialog.open || docxExportBusy) return;
+    dialog.close("cancel");
+  }
+
+  function readStoredHwpxSettings() {
+    const defaults = {
+      paper: "a4", orientation: "portrait", marginMm: 20,
+      font: "serif", includeImages: true, author: ""
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem("mdviewer.hwpxSettings") || "null");
+      if (!stored || typeof stored !== "object") return defaults;
+      return {
+        paper: ["a4", "letter"].includes(stored.paper) ? stored.paper : defaults.paper,
+        orientation: ["portrait", "landscape"].includes(stored.orientation)
+          ? stored.orientation : defaults.orientation,
+        marginMm: [0, 10, 20].includes(Number(stored.marginMm))
+          ? Number(stored.marginMm) : defaults.marginMm,
+        font: ["serif", "sans"].includes(stored.font) ? stored.font : defaults.font,
+        includeImages: stored.includeImages !== false,
+        author: typeof stored.author === "string" ? stored.author.slice(0, 120) : ""
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function hwpxSettingsFromControls() {
+    return {
+      paper: ["a4", "letter"].includes($("#hwpx-paper-select").value)
+        ? $("#hwpx-paper-select").value : "a4",
+      orientation: $('input[name="hwpx-orientation"]:checked')?.value === "landscape"
+        ? "landscape" : "portrait",
+      marginMm: [0, 10, 20].includes(Number($("#hwpx-margin-select").value))
+        ? Number($("#hwpx-margin-select").value) : 20,
+      font: $("#hwpx-font-select").value === "sans" ? "sans" : "serif",
+      includeImages: $("#hwpx-include-images").checked,
+      title: $("#hwpx-title-input").value.trim().slice(0, 240),
+      author: $("#hwpx-author-input").value.trim().slice(0, 120)
+    };
+  }
+
+  function updateHwpxSummary() {
+    const settings = hwpxSettingsFromControls();
+    const paper = settings.paper === "letter" ? "Letter" : "A4";
+    const orientation = i18n.t(settings.orientation === "landscape"
+      ? "Landscape" : "Portrait");
+    $("#hwpx-layout-summary").textContent = i18n.t(
+      "{paper} · {orientation} · {margin} mm margins",
+      { paper, orientation, margin: settings.marginMm });
+  }
+
+  function applyHwpxSettingsToControls(settings) {
+    $("#hwpx-paper-select").value = settings.paper;
+    const orientation = $(`input[name="hwpx-orientation"][value="${settings.orientation}"]`);
+    if (orientation) orientation.checked = true;
+    $("#hwpx-margin-select").value = String(settings.marginMm);
+    $("#hwpx-font-select").value = settings.font;
+    $("#hwpx-include-images").checked = settings.includeImages;
+    $("#hwpx-author-input").value = settings.author;
+    const stem = (state.name || i18n.t("Untitled")).replace(/\.[^.]+$/, "");
+    $("#hwpx-title-input").value = stem;
+    updateHwpxSummary();
+  }
+
+  function updateHwpxContentPreview() {
+    const preview = $("#hwpx-document-preview");
+    const clone = previewEditor.cloneNode(true);
+    clone.removeAttribute("id");
+    clone.removeAttribute("contenteditable");
+    clone.querySelectorAll("[contenteditable]").forEach((element) =>
+      element.removeAttribute("contenteditable"));
+    clone.querySelectorAll("input").forEach((input) => { input.disabled = true; });
+    preview.replaceChildren(...clone.childNodes);
+    preview.style.fontFamily = $("#hwpx-font-select").value === "sans"
+      ? '"함초롬돋움", "Malgun Gothic", sans-serif'
+      : '"함초롬바탕", Batang, serif';
+  }
+
+  function openHwpxExportDialog() {
+    const dialog = $("#hwpx-export-dialog");
+    if (dialog.open) return;
+    setExportFormatSelection("hwpx");
+    synchronizeDocumentForPdf();
+    applyHwpxSettingsToControls(readStoredHwpxSettings());
+    updateHwpxContentPreview();
+    hwpxExportBusy = false;
+    $("#hwpx-export-save").disabled = false;
+    $("#hwpx-export-status").textContent = i18n.t("Ready to export");
+    dialog.showModal();
+  }
+
+  function closeHwpxExportDialog() {
+    const dialog = $("#hwpx-export-dialog");
+    if (!dialog.open || hwpxExportBusy) return;
+    dialog.close("cancel");
+  }
+
+  function xmlEscape(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&apos;");
+  }
+
+  function hwpxUnitFromMillimeters(value) {
+    return Math.max(0, Math.round(Number(value) * 7200 / 25.4));
+  }
+
+  function hwpxPageMetrics(settings) {
+    let width = settings.paper === "letter" ? 61200 : 59528;
+    let height = settings.paper === "letter" ? 79200 : 84186;
+    if (settings.orientation === "landscape") [width, height] = [height, width];
+    const margin = hwpxUnitFromMillimeters(settings.marginMm);
+    return {
+      width, height, margin,
+      contentWidth: Math.max(7200, width - margin * 2),
+      contentHeight: Math.max(7200, height - margin * 2)
+    };
+  }
+
+  function hwpxSectionProperties(settings) {
+    const page = hwpxPageMetrics(settings);
+    const headerFooter = Math.min(page.margin, hwpxUnitFromMillimeters(10));
+    return `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
+      `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>` +
+      `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
+      `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
+      `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
+      `<hp:pagePr landscape="WIDELY" width="${page.width}" height="${page.height}" gutterType="LEFT_ONLY">` +
+      `<hp:margin header="${headerFooter}" footer="${headerFooter}" gutter="0" left="${page.margin}" right="${page.margin}" top="${page.margin}" bottom="${page.margin}"/>` +
+      `</hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>` +
+      `<hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/>` +
+      `<hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>` +
+      `<hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>` +
+      `<hp:noteLine length="14692344" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="567" aboveLine="850"/>` +
+      `<hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr>` +
+      `<hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>` +
+      `<hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>` +
+      `<hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>` +
+      `</hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
+  }
+
+  function hwpxCharId(style, headingLevel = 0, tableHeader = false) {
+    if (tableHeader) return 20;
+    if (headingLevel) return 13 + Math.min(6, Math.max(1, headingLevel));
+    if (style.code) return 12;
+    if (style.link) return 13;
+    if (style.strike) return 11;
+    if (style.bold && style.italic) return 10;
+    if (style.bold) return 8;
+    if (style.italic) return 9;
+    return 7;
+  }
+
+  function collectHwpxRuns(node, runs, style = {}, headingLevel = 0,
+    imageMap = new Map(), tableHeader = false) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.nodeValue || "").replace(/\s*\n\s*/g, " ");
+      if (text) runs.push({ text, charId: hwpxCharId(style, headingLevel, tableHeader) });
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === "br") {
+      runs.push({ text: " ", charId: hwpxCharId(style, headingLevel, tableHeader) });
+      return;
+    }
+    if (tag === "input") return;
+    if (tag === "img") {
+      const prepared = imageMap.get(node);
+      if (prepared) runs.push({ image: prepared });
+      else runs.push({
+        text: `[${i18n.t("Image")}: ${node.getAttribute("alt") || i18n.t("Unavailable")}]`,
+        charId: 9
+      });
+      return;
+    }
+    const next = { ...style };
+    if (["strong", "b"].includes(tag)) next.bold = true;
+    if (["em", "i"].includes(tag)) next.italic = true;
+    if (["del", "s", "strike"].includes(tag)) next.strike = true;
+    if (tag === "code") next.code = true;
+    if (tag === "a") next.link = true;
+    [...node.childNodes].forEach((child) =>
+      collectHwpxRuns(child, runs, next, headingLevel, imageMap, tableHeader));
+    if (tag === "a") {
+      const href = node.dataset.mdHref || node.getAttribute("href") || "";
+      if (href && href !== node.textContent) {
+        runs.push({ text: ` (${href})`, charId: 13 });
+      }
+    }
+  }
+
+  function hwpxPictureXml(image) {
+    const width = image.width;
+    const height = image.height;
+    const comment = image.alt ? `<hp:shapeComment>${xmlEscape(image.alt)}</hp:shapeComment>` : "";
+    return `<hp:pic id="${image.shapeId}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${image.shapeId}" reverse="0">` +
+      `<hp:offset x="0" y="0"/><hp:orgSz width="${width}" height="${height}"/><hp:curSz width="${width}" height="${height}"/>` +
+      `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${Math.round(width / 2)}" centerY="${Math.round(height / 2)}" rotateimage="1"/>` +
+      `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>` +
+      `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${width}" y="0"/><hc:pt2 x="${width}" y="${height}"/><hc:pt3 x="0" y="${height}"/></hp:imgRect>` +
+      `<hp:imgClip left="0" right="${width}" top="0" bottom="${height}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
+      `<hc:img binaryItemIDRef="${image.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>` +
+      `<hp:sz width="${width}" widthRelTo="ABSOLUTE" height="${height}" heightRelTo="ABSOLUTE" protect="0"/>` +
+      `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
+      `<hp:outMargin left="0" right="0" top="0" bottom="0"/>${comment}</hp:pic><hp:t/>`;
+  }
+
+  function hwpxRunsXml(runs) {
+    if (!runs.length) return `<hp:run charPrIDRef="7"><hp:t/></hp:run>`;
+    return runs.map((run) => run.image
+      ? `<hp:run charPrIDRef="7">${hwpxPictureXml(run.image)}</hp:run>`
+      : `<hp:run charPrIDRef="${run.charId}"><hp:t>${xmlEscape(run.text)}</hp:t></hp:run>`).join("");
+  }
+
+  function prepareDocumentImages(settings) {
+    const imageMap = new Map();
+    const records = [];
+    const allImages = [...previewEditor.querySelectorAll("img")];
+    let skipped = 0;
+    let totalCharacters = 0;
+    if (!settings.includeImages) return Promise.resolve({ imageMap, records, skipped });
+    skipped = Math.max(0, allImages.length - 128);
+    const page = hwpxPageMetrics(settings);
+    const images = allImages.slice(0, 128);
+    return images.reduce((promise, image, index) => promise.then(async () => {
+      try {
+        if (!image.complete || !image.naturalWidth || !image.naturalHeight) {
+          throw new Error("unavailable");
+        }
+        if (image.naturalWidth > 16384 || image.naturalHeight > 16384 ||
+            image.naturalWidth * image.naturalHeight > 64 * 1024 * 1024) {
+          throw new Error("dimensions");
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d", { alpha: true });
+        if (!context) throw new Error("canvas");
+        context.drawImage(image, 0, 0);
+        const dataUrl = canvas.toDataURL("image/png");
+        totalCharacters += dataUrl.length;
+        if (dataUrl.length > 24 * 1024 * 1024 || totalCharacters > 80 * 1024 * 1024) {
+          throw new Error("large");
+        }
+        const naturalWidth = Math.max(1, image.naturalWidth * 75);
+        const naturalHeight = Math.max(1, image.naturalHeight * 75);
+        const scale = Math.min(1, page.contentWidth / naturalWidth,
+          page.contentHeight * 0.8 / naturalHeight);
+        const prepared = {
+          id: `image${index + 1}`,
+          shapeId: 2000000000 + index + 1,
+          width: Math.max(720, Math.round(naturalWidth * scale)),
+          height: Math.max(720, Math.round(naturalHeight * scale)),
+          alt: image.getAttribute("alt") || ""
+        };
+        imageMap.set(image, prepared);
+        records.push(`${prepared.id}\t${dataUrl}`);
+      } catch {
+        skipped += 1;
+      }
+    }), Promise.resolve()).then(() => ({ imageMap, records, skipped }));
+  }
+
+  function buildHwpxSection(settings, imageMap) {
+    const namespace = `xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hp10="http://www.hancom.co.kr/hwpml/2016/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf/" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"`;
+    const page = hwpxPageMetrics(settings);
+    let nextId = 1000000001;
+    let firstParagraph = true;
+    const paragraph = (runs, paraPr = 0, headingLevel = 0) => {
+      const section = firstParagraph
+        ? `<hp:run charPrIDRef="7">${hwpxSectionProperties(settings)}</hp:run>` : "";
+      firstParagraph = false;
+      return `<hp:p id="${nextId++}" paraPrIDRef="${paraPr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${section}${hwpxRunsXml(runs, headingLevel)}</hp:p>`;
+    };
+    const runsFor = (element, headingLevel = 0, tableHeader = false) => {
+      const runs = [];
+      [...element.childNodes].forEach((child) =>
+        collectHwpxRuns(child, runs, {}, headingLevel, imageMap, tableHeader));
+      return runs;
+    };
+    const blocks = [];
+
+    const renderList = (list, depth = 0) => {
+      const ordered = list.tagName.toLowerCase() === "ol";
+      [...list.children].filter((child) => child.tagName?.toLowerCase() === "li")
+        .forEach((item, index) => {
+          const checkbox = item.querySelector(":scope > input[type='checkbox']");
+          const prefix = checkbox ? (checkbox.checked ? "☑ " : "☐ ")
+            : ordered ? `${index + 1}. ` : "• ";
+          const runs = [{ text: `${"  ".repeat(depth)}${prefix}`, charId: 7 }];
+          [...item.childNodes]
+            .filter((child) => !(child.nodeType === Node.ELEMENT_NODE &&
+              ["ul", "ol", "input"].includes(child.tagName.toLowerCase())))
+            .forEach((child) => collectHwpxRuns(child, runs, {}, 0, imageMap));
+          blocks.push(paragraph(runs, 22));
+          [...item.children].filter((child) => ["ul", "ol"].includes(child.tagName.toLowerCase()))
+            .forEach((nested) => renderList(nested, depth + 1));
+        });
+    };
+
+    const renderTable = (table) => {
+      const rows = [...table.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tr")];
+      if (!rows.length) return;
+      const colCount = Math.max(...rows.map((row) => row.children.length), 1);
+      const colWidth = Math.floor(page.contentWidth / colCount);
+      const rowHeight = 2400;
+      const section = firstParagraph
+        ? `<hp:run charPrIDRef="7">${hwpxSectionProperties(settings)}</hp:run>` : "";
+      firstParagraph = false;
+      let xml = `<hp:p id="${nextId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${section}<hp:run charPrIDRef="7">` +
+        `<hp:tbl id="${nextId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${rows.length}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">` +
+        `<hp:sz width="${page.contentWidth}" widthRelTo="ABSOLUTE" height="${rowHeight * rows.length}" heightRelTo="ABSOLUTE" protect="0"/>` +
+        `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
+        `<hp:outMargin left="0" right="0" top="283" bottom="283"/><hp:inMargin left="420" right="420" top="180" bottom="180"/>`;
+      rows.forEach((row, rowIndex) => {
+        xml += "<hp:tr>";
+        for (let column = 0; column < colCount; column += 1) {
+          const cell = row.children[column];
+          const header = rowIndex === 0 || cell?.tagName.toLowerCase() === "th";
+          const runs = cell ? runsFor(cell, 0, header) : [];
+          xml += `<hp:tc name="" header="${header ? 1 : 0}" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="3">` +
+            `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
+            `<hp:p id="${nextId++}" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${hwpxRunsXml(runs)}</hp:p></hp:subList>` +
+            `<hp:cellAddr colAddr="${column}" rowAddr="${rowIndex}"/><hp:cellSpan colSpan="1" rowSpan="1"/>` +
+            `<hp:cellSz width="${column === colCount - 1 ? page.contentWidth - colWidth * (colCount - 1) : colWidth}" height="${rowHeight}"/>` +
+            `<hp:cellMargin left="420" right="420" top="180" bottom="180"/></hp:tc>`;
+        }
+        xml += "</hp:tr>";
+      });
+      xml += "</hp:tbl><hp:t/></hp:run></hp:p>";
+      blocks.push(xml);
+    };
+
+    const renderBlock = (element, forcedParaPr = null) => {
+      const tag = element.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag)) {
+        const level = Number(tag[1]);
+        blocks.push(paragraph(runsFor(element, level), level + 1, level));
+      } else if (tag === "p" || tag === "div") {
+        blocks.push(paragraph(runsFor(element), forcedParaPr ??
+          (element.classList.contains("protected-block") ? 21 : 0)));
+      } else if (tag === "pre") {
+        const lines = String(element.textContent || "").replaceAll("\r\n", "\n").split("\n");
+        lines.forEach((line) => blocks.push(paragraph([
+          { text: line || " ", charId: 12 }
+        ], 21)));
+      } else if (tag === "blockquote") {
+        if (element.children.length) [...element.children].forEach((child) => renderBlock(child, 20));
+        else blocks.push(paragraph(runsFor(element), 20));
+      } else if (tag === "ul" || tag === "ol") {
+        renderList(element);
+      } else if (tag === "table") {
+        renderTable(element);
+      } else if (tag === "hr") {
+        blocks.push(paragraph([], 24));
+      } else {
+        blocks.push(paragraph(runsFor(element), forcedParaPr ?? 0));
+      }
+    };
+
+    [...previewEditor.children].forEach((element) => renderBlock(element));
+    if (!blocks.length) blocks.push(paragraph([], 0));
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${namespace}>${blocks.join("")}</hs:sec>`;
+  }
+
+  async function buildHwpxExportPayload() {
+    synchronizeDocumentForPdf();
+    await waitForPdfResources();
+    const settings = hwpxSettingsFromControls();
+    localStorage.setItem("mdviewer.hwpxSettings", JSON.stringify({
+      paper: settings.paper,
+      orientation: settings.orientation,
+      marginMm: settings.marginMm,
+      font: settings.font,
+      includeImages: settings.includeImages,
+      author: settings.author
+    }));
+    const prepared = await prepareDocumentImages(settings);
+    return {
+      ...settings,
+      sectionXml: buildHwpxSection(settings, prepared.imageMap),
+      previewText: previewEditor.innerText || previewEditor.textContent || "",
+      images: prepared.records.join("\n"),
+      skippedImages: prepared.skipped
+    };
+  }
+
+  function docxPageMetrics(settings) {
+    let width = settings.paper === "letter" ? 12240 : 11906;
+    let height = settings.paper === "letter" ? 15840 : 16838;
+    if (settings.orientation === "landscape") [width, height] = [height, width];
+    const margin = Math.max(0, Math.round(settings.marginMm * 1440 / 25.4));
+    return {
+      width, height, margin,
+      contentWidth: Math.max(1440, width - margin * 2),
+      contentHeight: Math.max(1440, height - margin * 2)
+    };
+  }
+
+  function docxSafeText(value) {
+    return String(value ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+  }
+
+  function docxSafeHyperlink(value) {
+    const target = docxSafeText(value).trim();
+    return /^(?:https?:\/\/|mailto:)/i.test(target) &&
+      !/[\u0000-\u001F\u007F]/.test(target) && target.length <= 8192
+      ? target : "";
+  }
+
+  function collectDocxRuns(node, runs, style, imageMap) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = docxSafeText(node.nodeValue).replace(/\s*\n\s*/g, " ");
+      if (text) runs.push({ text, ...style });
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === "br") {
+      runs.push({ break: true });
+      return;
+    }
+    if (tag === "input") return;
+    if (tag === "img") {
+      const image = imageMap.get(node);
+      if (image) runs.push({ image });
+      else runs.push({
+        text: `[${i18n.t("Image")}: ${node.getAttribute("alt") || i18n.t("Unavailable")}]`,
+        italic: true
+      });
+      return;
+    }
+    const next = { ...style };
+    if (["strong", "b"].includes(tag)) next.bold = true;
+    if (["em", "i"].includes(tag)) next.italic = true;
+    if (["del", "s", "strike"].includes(tag)) next.strike = true;
+    if (tag === "code") next.code = true;
+    if (tag === "a") {
+      const href = node.dataset.mdHref || node.getAttribute("href") || "";
+      next.link = docxSafeHyperlink(href);
+    }
+    [...node.childNodes].forEach((child) =>
+      collectDocxRuns(child, runs, next, imageMap));
+  }
+
+  function docxTextRunXml(run) {
+    if (run.break) return "<w:r><w:br/></w:r>";
+    const properties = [];
+    if (run.bold) properties.push("<w:b/><w:bCs/>");
+    if (run.italic) properties.push("<w:i/><w:iCs/>");
+    if (run.strike) properties.push("<w:strike/>");
+    if (run.code) properties.push(
+      '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Malgun Gothic"/>',
+      '<w:shd w:val="clear" w:fill="F1F3F5"/>',
+      '<w:sz w:val="19"/><w:szCs w:val="19"/>');
+    if (run.link) properties.push('<w:rStyle w:val="Hyperlink"/>');
+    const text = docxSafeText(run.text);
+    return `<w:r>${properties.length ? `<w:rPr>${properties.join("")}</w:rPr>` : ""}` +
+      `<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r>`;
+  }
+
+  function docxPictureXml(image, context) {
+    const width = Math.max(91440, Math.round(image.width * 127));
+    const height = Math.max(91440, Math.round(image.height * 127));
+    const relationId = `rIdImage${image.id.slice(5)}`;
+    const drawingId = context.nextDrawingId++;
+    const alt = docxSafeText(image.alt).slice(0, 1024);
+    return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" ` +
+      `xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="${width}" cy="${height}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+      `<wp:docPr id="${drawingId}" name="${xmlEscape(image.id)}" descr="${xmlEscape(alt)}"/>` +
+      `<wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:nvPicPr><pic:cNvPr id="0" name="${xmlEscape(image.id)}" descr="${xmlEscape(alt)}"/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip r:embed="${relationId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${width}" cy="${height}"/></a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>` +
+      `</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  }
+
+  function docxRunsXml(runs, context) {
+    if (!runs.length) return "<w:r><w:t/></w:r>";
+    return runs.map((run) => {
+      if (run.image) return docxPictureXml(run.image, context);
+      const runXml = docxTextRunXml(run);
+      if (!run.link) return runXml;
+      let id = context.linkByTarget.get(run.link);
+      if (!id) {
+        id = `link${context.hyperlinks.length + 1}`;
+        context.linkByTarget.set(run.link, id);
+        context.hyperlinks.push({ id, target: run.link });
+      }
+      return `<w:hyperlink r:id="rIdLink${id.slice(4)}" w:history="1">${runXml}</w:hyperlink>`;
+    }).join("");
+  }
+
+  function buildDocxDocument(settings, imageMap) {
+    const page = docxPageMetrics(settings);
+    const context = {
+      hyperlinks: [],
+      linkByTarget: new Map(),
+      lists: [],
+      nextDrawingId: 1
+    };
+    const blocks = [];
+    const runsFor = (element, initialStyle = {}) => {
+      const runs = [];
+      [...element.childNodes].forEach((child) =>
+        collectDocxRuns(child, runs, initialStyle, imageMap));
+      return runs;
+    };
+    const paragraph = (runs, options = {}) => {
+      const properties = [];
+      if (options.style) properties.push(`<w:pStyle w:val="${options.style}"/>`);
+      if (options.numId) {
+        properties.push(`<w:numPr><w:ilvl w:val="${Math.min(8, options.level || 0)}"/>` +
+          `<w:numId w:val="${options.numId}"/></w:numPr>`);
+      }
+      if (options.keepNext) properties.push("<w:keepNext/>");
+      if (options.horizontalRule) {
+        properties.push('<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="8" w:color="8A929E"/></w:pBdr>');
+      }
+      return `<w:p>${properties.length ? `<w:pPr>${properties.join("")}</w:pPr>` : ""}` +
+        `${docxRunsXml(runs, context)}</w:p>`;
+    };
+
+    const renderList = (list, depth = 0) => {
+      const ordered = list.tagName.toLowerCase() === "ol";
+      const start = ordered
+        ? Math.max(1, Math.min(1000000, Number(list.getAttribute("start")) || 1)) : 1;
+      context.lists.push({ ordered, start });
+      const numId = context.lists.length;
+      [...list.children].filter((child) => child.tagName?.toLowerCase() === "li")
+        .forEach((item) => {
+          const runs = [];
+          const checkbox = item.querySelector(":scope > input[type='checkbox']");
+          if (checkbox) runs.push({ text: checkbox.checked ? "☑ " : "☐ " });
+          [...item.childNodes]
+            .filter((child) => !(child.nodeType === Node.ELEMENT_NODE &&
+              ["ul", "ol", "input"].includes(child.tagName.toLowerCase())))
+            .forEach((child) => collectDocxRuns(child, runs, {}, imageMap));
+          blocks.push(paragraph(runs, { numId, level: depth }));
+          [...item.children]
+            .filter((child) => ["ul", "ol"].includes(child.tagName.toLowerCase()))
+            .forEach((nested) => renderList(nested, depth + 1));
+        });
+    };
+
+    const renderTable = (table) => {
+      const rows = [...table.querySelectorAll(
+        ":scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr, :scope > tr")];
+      if (!rows.length) return;
+      const colCount = Math.max(1, ...rows.map((row) => row.children.length));
+      const tableWidth = Math.max(720, page.contentWidth - 120);
+      const baseWidth = Math.floor(tableWidth / colCount);
+      const widths = Array.from({ length: colCount }, (_, index) =>
+        index === colCount - 1 ? tableWidth - baseWidth * (colCount - 1) : baseWidth);
+      let xml = `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/>` +
+        `<w:tblInd w:w="120" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+        `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="B8BEC7"/>` +
+        `<w:left w:val="single" w:sz="4" w:color="B8BEC7"/>` +
+        `<w:bottom w:val="single" w:sz="4" w:color="B8BEC7"/>` +
+        `<w:right w:val="single" w:sz="4" w:color="B8BEC7"/>` +
+        `<w:insideH w:val="single" w:sz="4" w:color="D5D9DF"/>` +
+        `<w:insideV w:val="single" w:sz="4" w:color="D5D9DF"/></w:tblBorders>` +
+        `<w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>` +
+        `<w:bottom w:w="90" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tblCellMar>` +
+        `</w:tblPr><w:tblGrid>${widths.map((width) => `<w:gridCol w:w="${width}"/>`).join("")}</w:tblGrid>`;
+      rows.forEach((row, rowIndex) => {
+        const isHeaderRow = rowIndex === 0 || [...row.children].every((cell) =>
+          cell.tagName.toLowerCase() === "th");
+        xml += `<w:tr>${isHeaderRow ? "<w:trPr><w:tblHeader/></w:trPr>" : ""}`;
+        for (let column = 0; column < colCount; column += 1) {
+          const cell = row.children[column];
+          const header = isHeaderRow || cell?.tagName.toLowerCase() === "th";
+          const cellRuns = cell ? runsFor(cell, header ? { bold: true } : {}) : [];
+          xml += `<w:tc><w:tcPr><w:tcW w:w="${widths[column]}" w:type="dxa"/>` +
+            `${header ? '<w:shd w:val="clear" w:fill="E9EDF2"/>' : ""}</w:tcPr>` +
+            `${paragraph(cellRuns, { style: "TableText" })}</w:tc>`;
+        }
+        xml += "</w:tr>";
+      });
+      xml += "</w:tbl>";
+      blocks.push(xml);
+    };
+
+    const renderBlock = (element, forcedStyle = "") => {
+      const tag = element.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag)) {
+        blocks.push(paragraph(runsFor(element), { style: `Heading${tag[1]}` }));
+      } else if (tag === "p" || tag === "div") {
+        blocks.push(paragraph(runsFor(element), forcedStyle ? { style: forcedStyle } : {}));
+      } else if (tag === "pre") {
+        const lines = docxSafeText(element.textContent).replaceAll("\r\n", "\n").split("\n");
+        const runs = [];
+        lines.forEach((line, index) => {
+          if (index) runs.push({ break: true });
+          runs.push({ text: line, code: true });
+        });
+        blocks.push(paragraph(runs, { style: "Code" }));
+      } else if (tag === "blockquote") {
+        if (element.children.length) {
+          [...element.children].forEach((child) => renderBlock(child, "Quote"));
+        } else {
+          blocks.push(paragraph(runsFor(element), { style: "Quote" }));
+        }
+      } else if (tag === "ul" || tag === "ol") {
+        renderList(element);
+      } else if (tag === "table") {
+        renderTable(element);
+      } else if (tag === "hr") {
+        blocks.push(paragraph([], { horizontalRule: true }));
+      } else {
+        blocks.push(paragraph(runsFor(element), forcedStyle ? { style: forcedStyle } : {}));
+      }
+    };
+
+    [...previewEditor.children].forEach((element) => renderBlock(element));
+    if (!blocks.length) blocks.push(paragraph([]));
+    const orientation = settings.orientation === "landscape" ? ' w:orient="landscape"' : "";
+    const headerFooter = Math.min(page.margin, 567);
+    const section = `<w:sectPr><w:pgSz w:w="${page.width}" w:h="${page.height}"${orientation}/>` +
+      `<w:pgMar w:top="${page.margin}" w:right="${page.margin}" w:bottom="${page.margin}" ` +
+      `w:left="${page.margin}" w:header="${headerFooter}" w:footer="${headerFooter}" w:gutter="0"/>` +
+      `<w:cols w:space="720"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
+    const namespaces = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+      'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    return {
+      documentXml: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<w:document ${namespaces}><w:body>${blocks.join("")}${section}</w:body></w:document>`,
+      hyperlinks: context.hyperlinks,
+      lists: context.lists
+    };
+  }
+
+  async function buildDocxExportPayload() {
+    synchronizeDocumentForPdf();
+    await waitForPdfResources();
+    const settings = docxSettingsFromControls();
+    localStorage.setItem("mdviewer.docxSettings", JSON.stringify({
+      paper: settings.paper,
+      orientation: settings.orientation,
+      marginMm: settings.marginMm,
+      font: settings.font,
+      includeImages: settings.includeImages,
+      author: settings.author
+    }));
+    const prepared = await prepareDocumentImages(settings);
+    const built = buildDocxDocument(settings, prepared.imageMap);
+    return {
+      ...settings,
+      documentXml: built.documentXml,
+      images: prepared.records.join("\n"),
+      hyperlinks: built.hyperlinks.map((link) => `${link.id}\t${link.target}`).join("\n"),
+      lists: built.lists.map((list) =>
+        `${list.ordered ? "ordered" : "bullet"}\t${list.start}`).join("\n"),
+      skippedImages: prepared.skipped
+    };
   }
 
   function sourceHeadingLevel() {
@@ -929,7 +1977,10 @@
     $$('[data-eol-menu]').forEach((item) =>
       item.setAttribute("aria-checked", String(item.dataset.eolMenu === state.eol)));
     $$('[data-menu-command="file.openGoogleDrive"], [data-menu-command="file.saveGoogleDriveAs"]')
-      .forEach((item) => { item.disabled = state.googleDriveBusy; });
+      .forEach((item) => {
+        item.hidden = !state.googleDriveAvailable;
+        item.disabled = state.googleDriveBusy;
+      });
     updateHeadingChrome();
     updateFormattingChrome();
     updatePosition();
@@ -1869,8 +2920,10 @@
   }
 
   function executeMenuCommand(name) {
-    if (name === "file.exportPdf") {
-      openPdfExportDialog();
+    if (name === "file.print") {
+      openPrintDialog();
+    } else if (name === "file.export") {
+      openExportDialog();
     } else if (name === "file.saveGoogleDriveAs") {
       openGoogleDriveSaveDialog();
     } else if (name.startsWith("file.") || name.startsWith("app.")) {
@@ -2098,6 +3151,8 @@
     });
 
     const pdfExportDialog = $("#pdf-export-dialog");
+    $$('[data-export-format-select]').forEach((select) =>
+      select.addEventListener("change", () => switchExportFormat(select.value)));
     [$("#pdf-paper-select"), $("#pdf-margin-select"),
       $("#pdf-page-numbers"), $("#pdf-print-background"),
       ...$$('input[name="pdf-orientation"]')]
@@ -2105,22 +3160,139 @@
         updatePdfPaperSummary();
         schedulePdfPreview();
       }));
+    $$('input[name="pdf-print-pages"]').forEach((control) =>
+      control.addEventListener("change", () => {
+        updatePrintPageRangeControls();
+        updatePdfPaperSummary();
+        if (!$("#pdf-page-range-input").disabled) {
+          $("#pdf-page-range-input").focus();
+        }
+        schedulePdfPreview();
+      }));
+    $("#pdf-page-range-input").addEventListener("input", () => {
+      updatePrintPageRangeControls();
+      updatePdfPaperSummary();
+      schedulePdfPreview(320);
+    });
     $$('[data-pdf-export-cancel]').forEach((button) =>
       button.addEventListener("click", closePdfExportDialog));
     pdfExportDialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       closePdfExportDialog();
     });
-    pdfExportDialog.addEventListener("click", (event) => {
-      if (event.target === pdfExportDialog) closePdfExportDialog();
+    $("#pdf-preview-frame").addEventListener("load", () => {
+      pdfPreviewFrameLoaded = true;
+      if (pdfDialogMode === "print" && pdfExportDialog.open &&
+          !$("#pdf-preview-frame").hidden) {
+        updatePdfActionAvailability();
+        $("#pdf-export-status").textContent = i18n.t("Preview ready");
+      }
+    });
+    $("#pdf-printer-select").addEventListener("change", () => {
+      preferredPrinterName = $("#pdf-printer-select").value;
+      storePrintSettings();
+      updatePrinterPropertiesAvailability();
+      updatePdfActionAvailability();
+    });
+    $("#pdf-printer-properties").addEventListener("click", () => {
+      const printerName = $("#pdf-printer-select").value;
+      if (!printerName || pdfPrinterPropertiesBusy || pdfPrintBusy) return;
+      setPrinterPropertiesBusy(true);
+      if (!post("printer.properties", { printerName })) {
+        setPrinterPropertiesBusy(false);
+        showPrinterPropertiesStatus(
+          i18n.t("Printer settings could not be opened"), "error");
+      }
+    });
+    $("#pdf-print-copies").addEventListener("input", () => {
+      storePrintSettings();
+      updatePdfActionAvailability();
     });
     $("#pdf-preview-retry").addEventListener("click", () => schedulePdfPreview(0));
     $("#pdf-export-save").addEventListener("click", () => {
       if (!activePdfPreviewRequest) return;
       $("#pdf-export-save").disabled = true;
-      $("#pdf-export-status").textContent = i18n.t("Saving PDF…");
-      if (!post("pdf.save", { requestId: activePdfPreviewRequest })) {
+      const printing = pdfDialogMode === "print";
+      $("#pdf-export-status").textContent = i18n.t(
+        printing ? "Sending to printer…" : "Saving PDF…");
+      const device = printDeviceSettingsFromControls();
+      if (printing) setPdfPrintBusy(true);
+      if (!post(printing ? "pdf.print" : "pdf.save", printing
+        ? {
+          requestId: activePdfPreviewRequest,
+          printerName: device.printerName,
+          copies: device.copies
+        } : { requestId: activePdfPreviewRequest })) {
+        if (printing) setPdfPrintBusy(false);
         showPdfPreviewState("error");
+      }
+    });
+
+    const docxExportDialog = $("#docx-export-dialog");
+    [$("#docx-paper-select"), $("#docx-margin-select"),
+      $("#docx-font-select"), $("#docx-include-images"),
+      ...$$("input[name='docx-orientation']")]
+      .forEach((control) => control.addEventListener("change", () => {
+        updateDocxSummary();
+        updateDocxContentPreview();
+      }));
+    $$('[data-docx-export-cancel]').forEach((button) =>
+      button.addEventListener("click", closeDocxExportDialog));
+    docxExportDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeDocxExportDialog();
+    });
+    $("#docx-export-save").addEventListener("click", async () => {
+      if (docxExportBusy) return;
+      docxExportBusy = true;
+      $("#docx-export-save").disabled = true;
+      $("#docx-export-status").textContent = i18n.t("Preparing DOCX…");
+      try {
+        const payload = await buildDocxExportPayload();
+        $("#docx-export-status").textContent = payload.skippedImages
+          ? i18n.t("Some images could not be embedded: {count}",
+            { count: payload.skippedImages })
+          : i18n.t("Saving DOCX…");
+        if (!post("docx.export", payload)) throw new Error("host unavailable");
+      } catch (error) {
+        console.error(error);
+        docxExportBusy = false;
+        $("#docx-export-save").disabled = false;
+        $("#docx-export-status").textContent = i18n.t("DOCX could not be saved");
+      }
+    });
+
+    const hwpxExportDialog = $("#hwpx-export-dialog");
+    [$("#hwpx-paper-select"), $("#hwpx-margin-select"),
+      $("#hwpx-font-select"), $("#hwpx-include-images"),
+      ...$$("input[name='hwpx-orientation']")]
+      .forEach((control) => control.addEventListener("change", () => {
+        updateHwpxSummary();
+        updateHwpxContentPreview();
+      }));
+    $$('[data-hwpx-export-cancel]').forEach((button) =>
+      button.addEventListener("click", closeHwpxExportDialog));
+    hwpxExportDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeHwpxExportDialog();
+    });
+    $("#hwpx-export-save").addEventListener("click", async () => {
+      if (hwpxExportBusy) return;
+      hwpxExportBusy = true;
+      $("#hwpx-export-save").disabled = true;
+      $("#hwpx-export-status").textContent = i18n.t("Preparing HWPX…");
+      try {
+        const payload = await buildHwpxExportPayload();
+        $("#hwpx-export-status").textContent = payload.skippedImages
+          ? i18n.t("Some images could not be embedded: {count}",
+            { count: payload.skippedImages })
+          : i18n.t("Saving HWPX…");
+        if (!post("hwpx.export", payload)) throw new Error("host unavailable");
+      } catch (error) {
+        console.error(error);
+        hwpxExportBusy = false;
+        $("#hwpx-export-save").disabled = false;
+        $("#hwpx-export-status").textContent = i18n.t("HWPX could not be saved");
       }
     });
 
@@ -2311,9 +3483,12 @@
       } else if (key === "s") {
         event.preventDefault();
         post("command", { name: event.shiftKey ? "file.saveAs" : "file.save" });
-      } else if (key === "p") {
+      } else if (key === "e" && event.shiftKey) {
         event.preventDefault();
-        openPdfExportDialog();
+        openExportDialog();
+      } else if (key === "p" && !event.shiftKey) {
+        event.preventDefault();
+        openPrintDialog();
       } else if (key === "o") {
         event.preventDefault(); post("command", { name: "file.open" });
       } else if (key === "n") {
@@ -2331,6 +3506,9 @@
     window.addEventListener("mdviewerhostmessage", async (event) => {
       const message = event.detail || {};
       if (message.type === "app.init" || message.type === "document.opened") {
+        if (message.capabilities) {
+          state.googleDriveAvailable = message.capabilities.googleDrive !== false;
+        }
         applyTheme(message.theme || state.theme);
         await i18n.setLocale(message.language || i18n.locale);
         populateLanguages();
@@ -2374,6 +3552,7 @@
       } else if (message.type === "pdf.previewReady") {
         if ($("#pdf-export-dialog").open &&
             Number(message.requestId) === activePdfPreviewRequest) {
+          pdfPreviewFrameLoaded = false;
           $("#pdf-preview-frame").src = `${message.url}#toolbar=0&navpanes=0`;
           showPdfPreviewState("ready");
         }
@@ -2391,6 +3570,61 @@
       } else if (message.type === "pdf.saveFailed") {
         $("#pdf-export-save").disabled = false;
         $("#pdf-export-status").textContent = i18n.t("PDF could not be saved");
+      } else if (message.type === "printer.listed") {
+        applyPrinterList(message.printers);
+      } else if (message.type === "printer.propertiesStarted") {
+        setPrinterPropertiesBusy(true);
+      } else if (message.type === "printer.propertiesApplied") {
+        advancedSettingsPrinterName = message.printerName ||
+          $("#pdf-printer-select").value;
+        setPrinterPropertiesBusy(false);
+        updatePrinterPropertiesAvailability();
+      } else if (message.type === "printer.propertiesCanceled") {
+        setPrinterPropertiesBusy(false);
+        updatePrinterPropertiesAvailability();
+      } else if (message.type === "printer.propertiesFailed") {
+        setPrinterPropertiesBusy(false);
+        showPrinterPropertiesStatus(message.message ||
+          i18n.t("Printer settings could not be opened"), "error");
+      } else if (message.type === "pdf.printStarted") {
+        $("#pdf-export-status").textContent = i18n.t("Sending to printer…");
+      } else if (message.type === "pdf.printed") {
+        const printerName = message.printerName || preferredPrinterName;
+        setPdfPrintBusy(false);
+        closePdfExportDialog();
+        showToast(i18n.t("Print job sent to {printer}", {
+          printer: printerName
+        }), "success");
+      } else if (message.type === "pdf.printFailed") {
+        setPdfPrintBusy(false);
+        $("#pdf-export-status").textContent = message.message ||
+          i18n.t("Printing could not be started");
+      } else if (message.type === "docx.saved") {
+        const path = message.path || "";
+        docxExportBusy = false;
+        closeDocxExportDialog();
+        showToast(i18n.t("DOCX saved to {path}", { path }), "success");
+      } else if (message.type === "docx.saveCanceled") {
+        docxExportBusy = false;
+        $("#docx-export-save").disabled = false;
+        $("#docx-export-status").textContent = i18n.t("Ready to export");
+      } else if (message.type === "docx.saveFailed") {
+        docxExportBusy = false;
+        $("#docx-export-save").disabled = false;
+        $("#docx-export-status").textContent = i18n.t("DOCX could not be saved");
+      } else if (message.type === "hwpx.saved") {
+        const path = message.path || "";
+        hwpxExportBusy = false;
+        closeHwpxExportDialog();
+        showToast(i18n.t("HWPX saved to {path}", { path }), "success");
+      } else if (message.type === "hwpx.saveCanceled") {
+        hwpxExportBusy = false;
+        $("#hwpx-export-save").disabled = false;
+        $("#hwpx-export-status").textContent = i18n.t("Ready to export");
+      } else if (message.type === "hwpx.saveFailed") {
+        hwpxExportBusy = false;
+        $("#hwpx-export-save").disabled = false;
+        $("#hwpx-export-status").textContent = i18n.t("HWPX could not be saved");
       } else if (message.type === "native.toast") {
         showToast(message.message || "", message.tone || "info", message.title || "");
       } else if (message.type === "image.embedded") {
@@ -2421,6 +3655,8 @@
       updateChrome();
       populateRecentDocuments();
       updatePdfPaperSummary();
+      updateDocxSummary();
+      updateHwpxSummary();
     });
     window.addEventListener("resize", () => {
       if (state.mode === "split" && innerWidth < splitMinimumWidth) setMode(activeEditorMode());

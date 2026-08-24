@@ -14,6 +14,7 @@
 #include "include/cef_v8.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -83,6 +84,13 @@ public:
         // Ubuntu 22.04 supports both X11 and Wayland. GTK3 embeds the CEF child
         // window through X11/XWayland for the first portable release.
         commandLine->AppendSwitchWithValue("ozone-platform", "x11");
+        if (std::getenv("WSL_INTEROP") || std::getenv("WSL_DISTRO_NAME")) {
+            // WSLg exposes an accelerated graphics stack, but some Mesa/D3D12
+            // combinations crash CEF's GPU subprocess. Software compositing is
+            // stable and still renders through WSLg's XWayland server.
+            commandLine->AppendSwitch("disable-gpu");
+            commandLine->AppendSwitch("disable-gpu-compositing");
+        }
 #endif
     }
 

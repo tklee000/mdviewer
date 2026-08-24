@@ -365,6 +365,9 @@ public:
         printSettings.margin_right = 0.0;
         printSettings.margin_bottom = 0.0;
         printSettings.margin_left = 0.0;
+        if (!settings.pageRanges.empty()) {
+            CefString(&printSettings.page_ranges) = settings.pageRanges;
+        }
         printSettings.display_header_footer = settings.pageNumbers ? 1 : 0;
         if (settings.pageNumbers) {
             CefString(&printSettings.header_template) =

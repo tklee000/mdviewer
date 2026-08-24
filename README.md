@@ -1,8 +1,9 @@
 # MdViewer
 
-MdViewer is a CEF-based Markdown editor with two editable views. The current
-validated release is Windows, with source-level Linux and macOS ports ready
-for continued development on their native build hosts:
+MdViewer is a CEF-based Markdown editor with two editable views. Windows is the
+primary release target. The GTK3/X11 Linux shell is build- and GUI-smoke-tested
+on Ubuntu 22.04 under Windows 11 WSLg; the macOS port is source-ready for
+continued work on a native build host:
 
 - **Source editing** edits the Markdown text directly.
 - **Preview editing** edits the rendered document and serializes supported
@@ -19,6 +20,13 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 - Open, edit, save, Save As, and command-line file opening for Markdown and MDZip
 - Exact PDF export with in-app A4/Letter print preview, orientation, margins,
   backgrounds, optional page numbers, and atomic Save As
+- Exact in-app print preview with printer selection, copy count, and all-pages
+  or custom ranges such as `1-3, 5`, followed by direct printing without a
+  second system dialog
+- Editable DOCX export with Word headings, lists, tables, hyperlinks, code,
+  images, A4/Letter page setup, metadata, Korean fonts, and atomic Save As
+- Editable HWPX export with A4/Letter page setup, portrait/landscape layout,
+  margins, document metadata, Korean fonts, tables, lists, code, and images
 - System-browser Google Drive Picker opening with direct save-back and conflict detection
 - A unified ten-item recent-document menu for local and Google Drive files
 - Single-instance forwarding when another Markdown file is double-clicked
@@ -35,6 +43,8 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 - Safe relative image loading from the Markdown document directory or directly from an MDZ archive
 - External file-change detection
 - Runtime UI language switching across 12 languages
+- Japanese app chrome uses MS UI Gothic while document editors and previews
+  retain their configured document fonts
 - MiniGitGUI-style dark/light themes with runtime switching and persistence
 - CEF UI translations backed by embedded JSON catalogs
 
@@ -42,6 +52,61 @@ The current preview serializer intentionally treats Markdown as the canonical
 document format. YAML front matter is displayed as a protected block. Complex
 extensions such as footnotes, math, Mermaid, and arbitrary
 HTML still require the round-trip work described in `플랜.md`.
+
+## Export
+
+`File > Export…` (`Ctrl+Shift+E`) opens one export workflow. Choose PDF, DOCX,
+or HWPX from the format selector, then review the format-specific settings and
+preview before saving. The last selected format is remembered for the next
+export.
+
+## Printing
+
+`File > Print…` (`Ctrl+P`) opens one in-app dialog containing the printer,
+number of copies, page range, A4/Letter paper, orientation, margin, background,
+and optional page-number settings. Choose all pages or enter one-based ranges
+separated by commas, for example `1-3, 5, 8-10`. The preview is regenerated
+with only those pages, so the document shown in the dialog is the document
+sent to the selected Windows printer. Clicking **Print** submits the job
+directly; a second system print dialog is not opened.
+
+Click **Advanced settings…** beside the selected printer to open that printer
+driver's document-properties sheet. Device-specific choices such as duplex
+binding, color mode, paper source, output quality, and finishing are retained
+for the current print dialog and passed to the direct print job. The in-app
+paper, orientation, and copy controls remain authoritative so the job matches
+the visible preview.
+
+The direct path uses the Windows PDF renderer, WIC image decoder, and GDI print
+spooler that are part of Windows. It adds no external print library or runtime
+dependency.
+
+## DOCX export
+
+`File > Export…` (`Ctrl+Shift+E`), followed by the DOCX format choice, converts
+the rendered Markdown into an editable Microsoft Word document. The dialog controls A4 or Letter paper,
+orientation, 0/10/20 mm margins, title, author, Malgun Gothic or Batang body
+font, and image embedding. Headings, numbered and bulleted lists, task items,
+tables, hyperlinks, quotations, code blocks, and images use native WordprocessingML
+structures rather than flattened screenshots.
+
+The product implementation does not add a DOCX library or runtime dependency.
+MdViewer writes the OOXML/OPC parts directly with C++20 and packages them using
+its existing bundled CRC32/raw-DEFLATE implementation. Microsoft Word is only
+used by the optional compatibility smoke test, not by the export feature.
+
+## HWPX export
+
+`File > Export…` (`Ctrl+Shift+E`), followed by the HWPX format choice, converts
+the rendered Markdown document into an editable OWPML package. The export dialog provides a content preview and
+controls for A4 or Letter paper, orientation, margins, title, author, body
+font, and image embedding. The output is written atomically as `.hwpx` and
+uses the standard `application/hwp+zip` package layout; no Hancom Office
+installation is required to export it.
+
+The content preview checks structure and styling, while final pagination is
+performed by Hancom Office and can vary with the installed fonts and version.
+Format implementation attribution is included under `licenses/owpml/`.
 
 ## MDZip documents
 
@@ -90,7 +155,7 @@ Create a clean release directory with:
 
 Platform-specific build and packaging instructions are available here:
 
-- `linux/README.md`: Ubuntu 22.04 baseline and AppImage packaging
+- `linux/README.md`: Ubuntu 22.04, Windows 11 WSLg, and AppImage packaging
 - `macos/README.md`: Cocoa app bundle, CEF helpers, signing, and DMG packaging
 
 ## File association
@@ -198,5 +263,8 @@ node .\tests\ui-smoke.mjs
 node .\tests\native-open-smoke.mjs
 node .\tests\native-mdz-smoke.mjs
 node .\tests\native-pdf-smoke.mjs
+node .\tests\native-print-smoke.mjs
+node .\tests\native-docx-smoke.mjs
+node .\tests\native-hwpx-smoke.mjs
 .\out\build\Release\MdViewerCoreTests.exe
 ```

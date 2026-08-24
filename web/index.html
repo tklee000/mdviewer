@@ -48,9 +48,11 @@
               </span>
               <span data-i18n="Save to Google Drive As…">Save to Google Drive As…</span>
             </button>
+            <button type="button" role="menuitem" data-menu-command="file.print"
+                    data-i18n="&amp;Print...	Ctrl+P">&amp;Print...	Ctrl+P</button>
             <div class="menu-separator" role="separator"></div>
-            <button type="button" role="menuitem" data-menu-command="file.exportPdf"
-                    data-i18n="Export to &amp;PDF...	Ctrl+P">Export to &amp;PDF...	Ctrl+P</button>
+            <button type="button" role="menuitem" data-menu-command="file.export"
+                    data-i18n="&amp;Export...	Ctrl+Shift+E">&amp;Export...	Ctrl+Shift+E</button>
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="app.exit" data-i18n="E&amp;xit">E&amp;xit</button>
           </div>
@@ -430,6 +432,15 @@
       <div class="pdf-export-content">
         <aside class="pdf-export-settings" aria-label="PDF settings"
                data-i18n-aria-label="PDF settings">
+          <label class="dialog-field export-format-field" data-export-format-field>
+            <span data-i18n="Export format">Export format</span>
+            <select data-export-format-select aria-label="Export format"
+                    data-i18n-aria-label="Export format">
+              <option value="pdf">PDF</option>
+              <option value="docx">DOCX</option>
+              <option value="hwpx">HWPX</option>
+            </select>
+          </label>
           <label class="dialog-field">
             <span data-i18n="Paper size">Paper size</span>
             <select id="pdf-paper-select">
@@ -460,22 +471,66 @@
             <input id="pdf-print-background" type="checkbox" checked>
             <span data-i18n="Print backgrounds">Print backgrounds</span>
           </label>
+          <div id="pdf-printer-settings" class="pdf-printer-settings" hidden>
+            <div class="pdf-printer-select-row">
+              <label class="dialog-field">
+                <span data-i18n="Printer">Printer</span>
+                <select id="pdf-printer-select" aria-label="Printer"
+                        data-i18n-aria-label="Printer" disabled>
+                  <option data-i18n="Loading printers…">Loading printers…</option>
+                </select>
+              </label>
+              <button id="pdf-printer-properties" type="button" disabled
+                      data-i18n="Advanced settings…">Advanced settings…</button>
+            </div>
+            <label class="dialog-field">
+              <span data-i18n="Copies">Copies</span>
+              <input id="pdf-print-copies" type="number" min="1" max="999"
+                     step="1" value="1" inputmode="numeric">
+            </label>
+            <span id="pdf-printer-properties-status" class="printer-properties-status"
+                  role="status" hidden></span>
+            <span id="pdf-printer-status" class="dialog-field-error"
+                  role="status" hidden></span>
+          </div>
+          <fieldset id="pdf-page-range-settings" class="pdf-page-range-settings" hidden>
+            <legend data-i18n="Pages to print">Pages to print</legend>
+            <label>
+              <input type="radio" name="pdf-print-pages" value="all" checked>
+              <span data-i18n="All pages">All pages</span>
+            </label>
+            <label>
+              <input type="radio" name="pdf-print-pages" value="custom">
+              <span data-i18n="Page range">Page range</span>
+            </label>
+            <input id="pdf-page-range-input" type="text" inputmode="numeric"
+                   maxlength="128" placeholder="1-3, 5"
+                   aria-label="Page range" data-i18n-aria-label="Page range" disabled>
+            <span id="pdf-page-range-error" class="dialog-field-error" role="alert" hidden
+                  data-i18n="Enter pages like 1-3, 5.">Enter pages like 1-3, 5.</span>
+          </fieldset>
           <p id="pdf-paper-summary" class="pdf-paper-summary"></p>
         </aside>
 
-        <section class="pdf-preview-panel" aria-label="Print preview"
+        <section class="pdf-preview-panel export-preview-panel" aria-label="Print preview"
                  data-i18n-aria-label="Print preview">
-          <div id="pdf-preview-loading" class="pdf-preview-message" role="status">
-            <span class="pdf-preview-spinner" aria-hidden="true"></span>
-            <strong data-i18n="Creating print preview…">Creating print preview…</strong>
-            <span data-i18n="Images and fonts are prepared before pagination.">Images and fonts are prepared before pagination.</span>
+          <div class="export-preview-toolbar">
+            <strong data-i18n="Print preview">Print preview</strong>
+            <span data-i18n="Review the final pages before saving.">Review the final pages before saving.</span>
           </div>
-          <div id="pdf-preview-error" class="pdf-preview-message" role="alert" hidden>
-            <strong data-i18n="Print preview could not be created.">Print preview could not be created.</strong>
-            <button id="pdf-preview-retry" type="button" data-i18n="Try again">Try again</button>
+          <div class="pdf-preview-stage">
+            <div id="pdf-preview-loading" class="pdf-preview-message" role="status">
+              <span class="pdf-preview-spinner" aria-hidden="true"></span>
+              <strong data-i18n="Creating print preview…">Creating print preview…</strong>
+              <span data-i18n="Images and fonts are prepared before pagination.">Images and fonts are prepared before pagination.</span>
+            </div>
+            <div id="pdf-preview-error" class="pdf-preview-message" role="alert" hidden>
+              <strong data-i18n="Print preview could not be created.">Print preview could not be created.</strong>
+              <button id="pdf-preview-retry" type="button" data-i18n="Try again">Try again</button>
+            </div>
+            <iframe id="pdf-preview-frame" title="Print preview"
+                    data-i18n-title="Print preview" hidden></iframe>
           </div>
-          <iframe id="pdf-preview-frame" title="Print preview"
-                  data-i18n-title="Print preview" hidden></iframe>
         </section>
       </div>
 
@@ -484,6 +539,176 @@
         <button type="button" data-pdf-export-cancel data-i18n="Cancel">Cancel</button>
         <button id="pdf-export-save" class="primary" type="button" disabled
                 data-i18n="Save PDF">Save PDF</button>
+      </footer>
+    </div>
+  </dialog>
+  <dialog id="docx-export-dialog" class="settings-dialog hwpx-export-dialog"
+          aria-labelledby="docx-export-dialog-title">
+    <div class="hwpx-export-shell">
+      <header class="settings-dialog-header">
+        <div>
+          <h2 id="docx-export-dialog-title" data-i18n="Export DOCX">Export DOCX</h2>
+          <p data-i18n="Create an editable Word document from the current Markdown.">Create an editable Word document from the current Markdown.</p>
+        </div>
+        <button class="dialog-close-button" type="button" data-docx-export-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+      <div class="hwpx-export-content">
+        <aside class="hwpx-export-settings" aria-label="DOCX settings"
+               data-i18n-aria-label="DOCX settings">
+          <label class="dialog-field export-format-field">
+            <span data-i18n="Export format">Export format</span>
+            <select data-export-format-select aria-label="Export format"
+                    data-i18n-aria-label="Export format">
+              <option value="pdf">PDF</option>
+              <option value="docx">DOCX</option>
+              <option value="hwpx">HWPX</option>
+            </select>
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Document title">Document title</span>
+            <input id="docx-title-input" type="text" maxlength="240">
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Author">Author</span>
+            <input id="docx-author-input" type="text" maxlength="120">
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Paper size">Paper size</span>
+            <select id="docx-paper-select">
+              <option value="a4">A4 (210 × 297 mm)</option>
+              <option value="letter">Letter (8.5 × 11 in)</option>
+            </select>
+          </label>
+          <fieldset class="pdf-choice-group">
+            <legend data-i18n="Orientation">Orientation</legend>
+            <label><input type="radio" name="docx-orientation" value="portrait" checked>
+              <span data-i18n="Portrait">Portrait</span></label>
+            <label><input type="radio" name="docx-orientation" value="landscape">
+              <span data-i18n="Landscape">Landscape</span></label>
+          </fieldset>
+          <label class="dialog-field">
+            <span data-i18n="Margins">Margins</span>
+            <select id="docx-margin-select">
+              <option value="20" data-i18n="Normal (20 mm)">Normal (20 mm)</option>
+              <option value="10" data-i18n="Narrow (10 mm)">Narrow (10 mm)</option>
+              <option value="0" data-i18n="None">None</option>
+            </select>
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Document font">Document font</span>
+            <select id="docx-font-select">
+              <option value="sans" data-i18n="Malgun Gothic">Malgun Gothic</option>
+              <option value="serif" data-i18n="Batang">Batang</option>
+            </select>
+          </label>
+          <label class="dialog-check-field">
+            <input id="docx-include-images" type="checkbox" checked>
+            <span data-i18n="Embed available images">Embed available images</span>
+          </label>
+          <p id="docx-layout-summary" class="pdf-paper-summary"></p>
+        </aside>
+        <section class="hwpx-preview-panel export-preview-panel" aria-label="DOCX content preview"
+                 data-i18n-aria-label="DOCX content preview">
+          <div class="export-preview-toolbar">
+            <strong data-i18n="Content preview">Content preview</strong>
+            <span data-i18n="Final pagination may differ in Microsoft Word.">Final pagination may differ in Microsoft Word.</span>
+          </div>
+          <div class="document-preview-scroll">
+            <article id="docx-document-preview" class="markdown-body"></article>
+          </div>
+        </section>
+      </div>
+      <footer class="settings-dialog-actions hwpx-export-actions">
+        <span id="docx-export-status" role="status"></span>
+        <button type="button" data-docx-export-cancel data-i18n="Cancel">Cancel</button>
+        <button id="docx-export-save" class="primary" type="button"
+                data-i18n="Save DOCX">Save DOCX</button>
+      </footer>
+    </div>
+  </dialog>
+  <dialog id="hwpx-export-dialog" class="settings-dialog hwpx-export-dialog"
+          aria-labelledby="hwpx-export-dialog-title">
+    <div class="hwpx-export-shell">
+      <header class="settings-dialog-header">
+        <div>
+          <h2 id="hwpx-export-dialog-title" data-i18n="Export HWPX">Export HWPX</h2>
+          <p data-i18n="Create an editable Hancom document from the current Markdown.">Create an editable Hancom document from the current Markdown.</p>
+        </div>
+        <button class="dialog-close-button" type="button" data-hwpx-export-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+      <div class="hwpx-export-content">
+        <aside class="hwpx-export-settings" aria-label="HWPX settings"
+               data-i18n-aria-label="HWPX settings">
+          <label class="dialog-field export-format-field">
+            <span data-i18n="Export format">Export format</span>
+            <select data-export-format-select aria-label="Export format"
+                    data-i18n-aria-label="Export format">
+              <option value="pdf">PDF</option>
+              <option value="docx">DOCX</option>
+              <option value="hwpx">HWPX</option>
+            </select>
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Document title">Document title</span>
+            <input id="hwpx-title-input" type="text" maxlength="240">
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Author">Author</span>
+            <input id="hwpx-author-input" type="text" maxlength="120">
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Paper size">Paper size</span>
+            <select id="hwpx-paper-select">
+              <option value="a4">A4 (210 × 297 mm)</option>
+              <option value="letter">Letter (8.5 × 11 in)</option>
+            </select>
+          </label>
+          <fieldset class="pdf-choice-group">
+            <legend data-i18n="Orientation">Orientation</legend>
+            <label><input type="radio" name="hwpx-orientation" value="portrait" checked>
+              <span data-i18n="Portrait">Portrait</span></label>
+            <label><input type="radio" name="hwpx-orientation" value="landscape">
+              <span data-i18n="Landscape">Landscape</span></label>
+          </fieldset>
+          <label class="dialog-field">
+            <span data-i18n="Margins">Margins</span>
+            <select id="hwpx-margin-select">
+              <option value="20" data-i18n="Normal (20 mm)">Normal (20 mm)</option>
+              <option value="10" data-i18n="Narrow (10 mm)">Narrow (10 mm)</option>
+              <option value="0" data-i18n="None">None</option>
+            </select>
+          </label>
+          <label class="dialog-field">
+            <span data-i18n="Document font">Document font</span>
+            <select id="hwpx-font-select">
+              <option value="serif" data-i18n="Hamchorom Batang">Hamchorom Batang</option>
+              <option value="sans" data-i18n="Hamchorom Dotum">Hamchorom Dotum</option>
+            </select>
+          </label>
+          <label class="dialog-check-field">
+            <input id="hwpx-include-images" type="checkbox" checked>
+            <span data-i18n="Embed available images">Embed available images</span>
+          </label>
+          <p id="hwpx-layout-summary" class="pdf-paper-summary"></p>
+        </aside>
+        <section class="hwpx-preview-panel export-preview-panel" aria-label="HWPX content preview"
+                 data-i18n-aria-label="HWPX content preview">
+          <div class="export-preview-toolbar">
+            <strong data-i18n="Content preview">Content preview</strong>
+            <span data-i18n="Final pagination may differ in Hancom Office.">Final pagination may differ in Hancom Office.</span>
+          </div>
+          <div class="document-preview-scroll">
+            <article id="hwpx-document-preview" class="markdown-body"></article>
+          </div>
+        </section>
+      </div>
+      <footer class="settings-dialog-actions hwpx-export-actions">
+        <span id="hwpx-export-status" role="status"></span>
+        <button type="button" data-hwpx-export-cancel data-i18n="Cancel">Cancel</button>
+        <button id="hwpx-export-save" class="primary" type="button"
+                data-i18n="Save HWPX">Save HWPX</button>
       </footer>
     </div>
   </dialog>

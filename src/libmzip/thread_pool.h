@@ -1,6 +1,14 @@
 #pragma once
 #include "common.h"
 
+#include <condition_variable>
+#include <cstddef>
+#include <future>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <type_traits>
+
 namespace fz {
 
 class ThreadPool {

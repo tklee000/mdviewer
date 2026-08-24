@@ -164,10 +164,26 @@ private:
                           bool success);
     void ClosePdfPreview();
     void SavePdfPreview(std::uint64_t requestId);
+    void SendPrinters();
+    bool IsKnownPrinter(const std::wstring& printerName) const;
+    void ShowPrinterProperties(std::wstring printerName);
+    void PrintPdfPreview(std::uint64_t requestId,
+                         std::wstring printerName,
+                         std::uint32_t copies);
     std::wstring ChoosePdfFileToSave() const;
     bool WritePdfFile(const std::wstring& path,
                       const std::vector<unsigned char>& bytes,
                       std::wstring* errorMessage) const;
+    void ExportDocx(const std::string& message);
+    std::wstring ChooseDocxFileToSave() const;
+    bool WriteDocxFile(const std::wstring& path,
+                       const std::string& bytes,
+                       std::wstring* errorMessage) const;
+    void ExportHwpx(const std::string& message);
+    std::wstring ChooseHwpxFileToSave() const;
+    bool WriteHwpxFile(const std::wstring& path,
+                       const std::string& bytes,
+                       std::wstring* errorMessage) const;
     std::wstring ChooseFileToOpen() const;
     std::optional<SaveSelection> ChooseFileToSave() const;
     void CheckExternalFileChange();
@@ -211,5 +227,13 @@ private:
     std::uint64_t pdfPreviewRequestId_ = 0;
     std::optional<PdfPreviewRequest> pendingPdfPreviewRequest_;
     std::shared_ptr<const std::vector<unsigned char>> pdfPreviewBytes_;
+    PdfPrintSettings activePdfPreviewSettings_;
+    PdfPrintSettings pdfPreviewSettings_;
     std::wstring pdfPreviewTemporaryPath_;
+    std::jthread printerWorker_;
+    bool directPrintInProgress_ = false;
+    bool printerPropertiesInProgress_ = false;
+    bool printerPropertiesApplied_ = false;
+    std::wstring printerPropertiesName_;
+    std::vector<unsigned char> printerDeviceMode_;
 };

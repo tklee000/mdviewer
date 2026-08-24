@@ -122,7 +122,10 @@ try {
     "document.querySelector('#document-name')?.textContent === 'pdf-export-smoke.md'"),
   "PDF source document did not open.");
 
-  await evaluate("document.querySelector('[data-menu-command=\"file.exportPdf\"]').click()");
+  await evaluate(`(() => {
+    localStorage.setItem('mdviewer.exportFormat', 'pdf');
+    document.querySelector('[data-menu-command="file.export"]').click();
+  })()`);
   await waitFor(() => evaluate(
     "!document.querySelector('#pdf-export-save').disabled && " +
     "document.querySelector('#pdf-preview-frame').src.includes('__pdf-preview?request=')"),

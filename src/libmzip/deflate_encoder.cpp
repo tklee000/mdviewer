@@ -767,8 +767,8 @@ TokenizedBlock tokenize_block(const uint8_t* data,
         head[h] = static_cast<int32_t>(pos);
     };
 
-    // Prime the hash chains with the preceding 32 KiB so independently compressed
-    // parallel blocks can still reference data across the block boundary.
+    // Prime the hash chains with the preceding 32 KiB so separately encoded
+    // chunks can still reference data across the chunk boundary.
     for (size_t pos = 0; pos < emit_start; ++pos) {
         if ((pos % kCancelCheckInterval) == 0) throw_if_cancelled(cancel);
         insert_position(pos);
@@ -1119,7 +1119,7 @@ DeflateResult compress_optimal_chunk(const uint8_t* data,
         block_start = block_end;
     }
 
-    // Independent parallel chunks must start on the same bit boundary. A tiny
+    // Separately encoded chunks must start on the same bit boundary. A tiny
     // empty stored block aligns every non-final chunk without resetting the
     // 32 KiB Deflate history used by the next chunk.
     if (!final_chunk) write_alignment_block(writer);
@@ -1128,10 +1128,9 @@ DeflateResult compress_optimal_chunk(const uint8_t* data,
 
 } // namespace
 
-DeflateResult deflate_parallel(const uint8_t* data,
-                               size_t size,
-                               const DeflateOptions& options,
-                               ThreadPool& pool) {
+DeflateResult deflate(const uint8_t* data,
+                      size_t size,
+                      const DeflateOptions& options) {
     const size_t chunk_size = std::clamp<size_t>(options.chunk_size, 256u * 1024u, 1024u * 1024u * 1024u);
     const MatchLengthFn match_fn = options.use_avx2 ? match_length_avx2 : match_length_scalar;
     throw_if_cancelled(options.cancel);
@@ -1141,16 +1140,7 @@ DeflateResult deflate_parallel(const uint8_t* data,
     }
     const size_t chunk_count = (size + chunk_size - 1) / chunk_size;
 
-    std::vector<std::future<DeflateResult>> futures;
-    futures.reserve(chunk_count);
-    struct FutureDrain {
-        std::vector<std::future<DeflateResult>>& futures;
-        ~FutureDrain() {
-            for (auto& future : futures) {
-                if (future.valid()) future.wait();
-            }
-        }
-    } future_drain{futures};
+    BitWriter combined(size + size / 64 + 256);
     for (size_t index = 0; index < chunk_count; ++index) {
         const size_t offset = index * chunk_size;
         const size_t payload_size = offset < size ? std::min(chunk_size, size - offset) : 0;
@@ -1158,27 +1148,22 @@ DeflateResult deflate_parallel(const uint8_t* data,
         const uint8_t* block_data = payload_size ? data + offset - history_size : nullptr;
         const size_t block_size = history_size + payload_size;
         const bool final_block = index + 1 == chunk_count;
-        futures.emplace_back(pool.submit([=]() {
-            throw_if_cancelled(options.cancel);
-            const int level = std::clamp(options.level, 1, 9);
-            if (level == 5) {
-                return compress_fast_chunk(block_data, block_size, history_size,
+        throw_if_cancelled(options.cancel);
+        const int level = std::clamp(options.level, 1, 9);
+        DeflateResult block;
+        if (level == 5) {
+            block = compress_fast_chunk(block_data, block_size, history_size,
+                                        final_block, level, match_fn,
+                                        options.cancel);
+        } else if (level >= 6) {
+            block = compress_optimal_chunk(block_data, block_size, history_size,
                                            final_block, level, match_fn,
                                            options.cancel);
-            }
-            if (level >= 6) {
-                return compress_optimal_chunk(block_data, block_size, history_size,
-                                              final_block, level, match_fn, options.cancel);
-            }
-            return compress_block(block_data, block_size, history_size, final_block,
-                                  level, match_fn, options.cancel);
-        }));
-    }
-
-    BitWriter combined(size + size / 64 + 256);
-    for (size_t index = 0; index < futures.size(); ++index) {
-        throw_if_cancelled(options.cancel);
-        DeflateResult block = futures[index].get();
+        } else {
+            block = compress_block(block_data, block_size, history_size,
+                                   final_block, level, match_fn,
+                                   options.cancel);
+        }
         combined.append_stream(block.bytes, block.bit_count);
         if (options.progress)
             options.progress(std::min(size, (index + 1) * chunk_size));

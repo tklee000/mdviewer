@@ -40,9 +40,10 @@ typedef enum MzipCodecStatus {
 typedef struct MzipCodecOptions {
     // 0 selects the library default (level 5); 1..9 select a concrete level.
     int level;
-    // 0 selects the logical processor count. Values above 256 are clamped.
+    // Retained for source and ABI compatibility. The codec is always
+    // single-threaded, so this value is ignored.
     uint32_t threads;
-    // Deflate parallel chunk size in MiB. 0 selects 1 MiB.
+    // Deflate chunk size in MiB. 0 selects 1 MiB.
     uint32_t block_mib;
     // Non-zero requests AVX2 matching. The library automatically falls back
     // to the scalar matcher when the current CPU does not support AVX2.

@@ -1,8 +1,11 @@
 #pragma once
 
+#include "MdzArchive.h"
+
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -19,10 +22,33 @@ public:
 
     std::optional<UiResource> Load(const std::string& url) const;
     void SetDocumentDirectory(std::filesystem::path directory);
+    void SetDocumentArchive(std::shared_ptr<const mdz::Entries> entries,
+                            std::string entryPoint);
 
 private:
     std::filesystem::path webRoot_;
+    mutable std::mutex documentMutex_;
     std::filesystem::path documentDirectory_;
+    std::shared_ptr<const mdz::Entries> documentArchive_;
+    std::string archiveEntryPoint_;
+};
+
+enum class TextEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+};
+
+enum class DocumentFormat {
+    Markdown,
+    Mdz,
+};
+
+struct SaveSelection {
+    std::filesystem::path path;
+    TextEncoding encoding = TextEncoding::Utf8;
+    DocumentFormat format = DocumentFormat::Markdown;
 };
 
 enum class SavePromptResult {
@@ -36,8 +62,10 @@ public:
     virtual ~PortablePlatform() = default;
 
     virtual std::optional<std::filesystem::path> ChooseOpenFile() = 0;
-    virtual std::optional<std::filesystem::path> ChooseSaveFile(
-        const std::filesystem::path& currentPath) = 0;
+    virtual std::optional<SaveSelection> ChooseSaveFile(
+        const std::filesystem::path& currentPath,
+        TextEncoding currentEncoding,
+        DocumentFormat currentFormat) = 0;
     virtual SavePromptResult ConfirmSaveChanges(const std::string& displayName) = 0;
     virtual void ShowError(const std::string& title, const std::string& message) = 0;
     virtual void ShowAbout() = 0;
@@ -86,8 +114,10 @@ private:
     std::string editorMode_ = "preview";
     bool dirty_ = false;
     bool ready_ = false;
-    bool hadBom_ = false;
+    TextEncoding encoding_ = TextEncoding::Utf8;
+    DocumentFormat format_ = DocumentFormat::Markdown;
     bool usedCrLf_ = false;
+    std::shared_ptr<mdz::Package> archive_;
 };
 
 std::string JsonQuote(const std::string& value);

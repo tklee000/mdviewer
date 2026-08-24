@@ -3,7 +3,6 @@
 #include "deflate_decoder.h"
 #include "deflate_encoder.h"
 #include "platform.h"
-#include "thread_pool.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -12,11 +11,9 @@ namespace {
 
 constexpr int kDefaultLevel = 5;
 constexpr size_t kDefaultBlockSize = 1u * 1024u * 1024u;
-constexpr size_t kMaxThreads = 256;
 
 struct NormalizedOptions {
     int level = kDefaultLevel;
-    size_t threads = 1;
     size_t block_size = kDefaultBlockSize;
     bool use_avx2 = true;
 };
@@ -40,19 +37,11 @@ NormalizedOptions normalize_options(const MzipCodecOptions* options) {
         if (normalized.level < 1 || normalized.level > 9)
             throw std::invalid_argument("Mzip codec level must be 1..9 or 0");
 
-        const size_t requested_threads = options->threads == 0
-            ? std::max<unsigned>(1, std::thread::hardware_concurrency())
-            : static_cast<size_t>(options->threads);
-        normalized.threads = std::clamp<size_t>(requested_threads, 1, kMaxThreads);
-
         const uint32_t block_mib = options->block_mib == 0 ? 1u : options->block_mib;
         if (block_mib > 1024u)
             throw std::invalid_argument("Mzip codec block_mib must be 0..1024");
         normalized.block_size = static_cast<size_t>(block_mib) * 1024u * 1024u;
         normalized.use_avx2 = options->use_avx2 != 0;
-    } else {
-        normalized.threads = std::clamp<size_t>(
-            std::max<unsigned>(1, std::thread::hardware_concurrency()), 1, kMaxThreads);
     }
     normalized.use_avx2 = normalized.use_avx2 && fz::cpu_has_avx2();
     return normalized;
@@ -103,15 +92,13 @@ MzipCodecStatus copy_to_buffer(std::vector<uint8_t>&& bytes,
 
 std::vector<uint8_t> encode_deflate(const uint8_t* input, size_t input_size,
                                     const NormalizedOptions& options) {
-    // deflate_parallel intentionally leaves an empty input without a block;
-    // expose the canonical final empty stored block for the public API.
+    // Expose the canonical final empty stored block for the public API.
     if (input_size == 0) return {0x01, 0x00, 0x00, 0xFF, 0xFF};
     fz::DeflateOptions deflate;
     deflate.level = options.level;
     deflate.chunk_size = options.block_size;
     deflate.use_avx2 = options.use_avx2;
-    fz::ThreadPool pool(options.threads);
-    return fz::deflate_parallel(input, input_size, deflate, pool).bytes;
+    return fz::deflate(input, input_size, deflate).bytes;
 }
 
 MzipCodecStatus decode_deflate_to_buffer(const uint8_t* input, size_t input_size,
@@ -154,7 +141,7 @@ extern "C" {
 MZIP_CODEC_API void mzip_codec_options_init(MzipCodecOptions* options) {
     if (options == nullptr) return;
     options->level = kDefaultLevel;
-    options->threads = 0;
+    options->threads = 1;
     options->block_mib = 1;
     options->use_avx2 = 1;
     options->reserved[0] = options->reserved[1] = options->reserved[2] = 0;

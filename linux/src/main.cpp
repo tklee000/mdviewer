@@ -3,6 +3,7 @@
 
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
+#include "include/wrapper/cef_helpers.h"
 
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 
 namespace {
@@ -87,6 +89,65 @@ std::optional<std::filesystem::path> InitialFile(int argc, char* argv[]) {
     return std::nullopt;
 }
 
+const char* EncodingChoiceId(mdviewer::TextEncoding encoding) {
+    switch (encoding) {
+        case mdviewer::TextEncoding::Utf8: return "utf8";
+        case mdviewer::TextEncoding::Utf8Bom: return "utf8bom";
+        case mdviewer::TextEncoding::Utf16Le: return "utf16le";
+        case mdviewer::TextEncoding::Utf16Be: return "utf16be";
+    }
+    return "utf8";
+}
+
+mdviewer::TextEncoding EncodingFromChoice(const char* choice) {
+    const std::string value = choice ? choice : "utf8";
+    if (value == "utf8bom") return mdviewer::TextEncoding::Utf8Bom;
+    if (value == "utf16le") return mdviewer::TextEncoding::Utf16Le;
+    if (value == "utf16be") return mdviewer::TextEncoding::Utf16Be;
+    return mdviewer::TextEncoding::Utf8;
+}
+
+std::string LowerExtension(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                   });
+    return extension;
+}
+
+void UseDefaultX11Visual(GtkWidget* widget) {
+#if GTK_CHECK_VERSION(3, 15, 1)
+    GdkScreen* screen = gdk_screen_get_default();
+    if (!screen || !GDK_IS_X11_SCREEN(screen)) return;
+
+    Visual* defaultVisual = DefaultVisual(
+        GDK_SCREEN_XDISPLAY(screen), GDK_SCREEN_XNUMBER(screen));
+    GList* visuals = gdk_screen_list_visuals(screen);
+    for (GList* current = visuals; current; current = current->next) {
+        auto* visual = GDK_X11_VISUAL(current->data);
+        if (defaultVisual->visualid == gdk_x11_visual_get_xvisual(visual)->visualid) {
+            gtk_widget_set_visual(widget, visual);
+            break;
+        }
+    }
+    g_list_free(visuals);
+#else
+    (void)widget;
+#endif
+}
+
+int HandleXError(Display* display, XErrorEvent* event) {
+    (void)display;
+    (void)event;
+    return 0;
+}
+
+int HandleXIoError(Display* display) {
+    (void)display;
+    return 0;
+}
+
 class LinuxShell final : public mdviewer::PortableCefDelegate,
                          public mdviewer::PortablePlatform {
 public:
@@ -112,6 +173,7 @@ public:
         gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
         gtk_widget_set_size_request(window_, 720, 460);
         gtk_widget_add_events(window_, GDK_STRUCTURE_MASK);
+        UseDefaultX11Visual(window_);
 
         const auto icon = IconPath(executable_);
         if (std::filesystem::exists(icon)) {
@@ -120,8 +182,10 @@ public:
 
         g_signal_connect(window_, "delete-event", G_CALLBACK(OnDeleteEvent), this);
         g_signal_connect(window_, "size-allocate", G_CALLBACK(OnSizeAllocate), this);
+        g_signal_connect(window_, "focus-in-event", G_CALLBACK(OnFocusIn), this);
         gtk_widget_realize(window_);
         gtk_widget_show_all(window_);
+        gdk_display_flush(gtk_widget_get_display(window_));
 
         const Window parent = GDK_WINDOW_XID(gtk_widget_get_window(window_));
         GtkAllocation allocation{};
@@ -167,13 +231,27 @@ public:
 
     std::optional<std::filesystem::path> ChooseOpenFile() override {
         GtkWidget* dialog = gtk_file_chooser_dialog_new(
-            "Open Markdown", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_OPEN,
+            "Open Document", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_OPEN,
             "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, nullptr);
-        GtkFileFilter* filter = gtk_file_filter_new();
-        gtk_file_filter_set_name(filter, "Markdown (*.md, *.markdown)");
-        gtk_file_filter_add_pattern(filter, "*.md");
-        gtk_file_filter_add_pattern(filter, "*.markdown");
-        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+        GtkFileFilter* supportedFilter = gtk_file_filter_new();
+        gtk_file_filter_set_name(
+            supportedFilter, "Supported documents (*.md, *.markdown, *.mdz)");
+        gtk_file_filter_add_pattern(supportedFilter, "*.md");
+        gtk_file_filter_add_pattern(supportedFilter, "*.markdown");
+        gtk_file_filter_add_pattern(supportedFilter, "*.mdz");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), supportedFilter);
+
+        GtkFileFilter* markdownFilter = gtk_file_filter_new();
+        gtk_file_filter_set_name(markdownFilter, "Markdown (*.md, *.markdown)");
+        gtk_file_filter_add_pattern(markdownFilter, "*.md");
+        gtk_file_filter_add_pattern(markdownFilter, "*.markdown");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), markdownFilter);
+
+        GtkFileFilter* mdzFilter = gtk_file_filter_new();
+        gtk_file_filter_set_name(mdzFilter, "MDZip (*.mdz)");
+        gtk_file_filter_add_pattern(mdzFilter, "*.mdz");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), mdzFilter);
+        gtk_file_chooser_set_filter(GTK_FILE_CHOOSER(dialog), supportedFilter);
 
         std::optional<std::filesystem::path> result;
         if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
@@ -187,26 +265,69 @@ public:
         return result;
     }
 
-    std::optional<std::filesystem::path> ChooseSaveFile(
-        const std::filesystem::path& currentPath) override {
+    std::optional<mdviewer::SaveSelection> ChooseSaveFile(
+        const std::filesystem::path& currentPath,
+        mdviewer::TextEncoding currentEncoding,
+        mdviewer::DocumentFormat currentFormat) override {
         GtkWidget* dialog = gtk_file_chooser_dialog_new(
-            "Save Markdown", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_SAVE,
+            "Save Document", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_SAVE,
             "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
-        gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
+        auto* chooser = GTK_FILE_CHOOSER(dialog);
+        gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
+
+        GtkFileFilter* markdownFilter = gtk_file_filter_new();
+        gtk_file_filter_set_name(markdownFilter, "Markdown (*.md, *.markdown)");
+        gtk_file_filter_add_pattern(markdownFilter, "*.md");
+        gtk_file_filter_add_pattern(markdownFilter, "*.markdown");
+        gtk_file_chooser_add_filter(chooser, markdownFilter);
+
+        GtkFileFilter* mdzFilter = gtk_file_filter_new();
+        gtk_file_filter_set_name(mdzFilter, "MDZip (*.mdz)");
+        gtk_file_filter_add_pattern(mdzFilter, "*.mdz");
+        gtk_file_chooser_add_filter(chooser, mdzFilter);
+        gtk_file_chooser_set_filter(
+            chooser, currentFormat == mdviewer::DocumentFormat::Mdz
+                ? mdzFilter : markdownFilter);
+
+        static const char* encodingIds[] = {
+            "utf8", "utf8bom", "utf16le", "utf16be", nullptr};
+        static const char* encodingLabels[] = {
+            "UTF-8", "UTF-8 (BOM)", "UTF-16 LE", "UTF-16 BE", nullptr};
+        gtk_file_chooser_add_choice(
+            chooser, "encoding", "Encoding", encodingIds, encodingLabels);
+        gtk_file_chooser_set_choice(
+            chooser, "encoding", EncodingChoiceId(currentEncoding));
+
         const std::string suggested = currentPath.empty()
-            ? "Untitled.md"
+            ? (currentFormat == mdviewer::DocumentFormat::Mdz
+                ? "Untitled.mdz" : "Untitled.md")
             : mdviewer::PathToUtf8(currentPath.filename());
-        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), suggested.c_str());
+        gtk_file_chooser_set_current_name(chooser, suggested.c_str());
         if (!currentPath.empty()) {
             gtk_file_chooser_set_current_folder(
-                GTK_FILE_CHOOSER(dialog), currentPath.parent_path().string().c_str());
+                chooser, currentPath.parent_path().string().c_str());
         }
 
-        std::optional<std::filesystem::path> result;
+        std::optional<mdviewer::SaveSelection> result;
         if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
-            char* name = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+            char* name = gtk_file_chooser_get_filename(chooser);
             if (name) {
-                result = std::filesystem::path(name);
+                mdviewer::SaveSelection selection;
+                selection.path = std::filesystem::path(name);
+                selection.format = gtk_file_chooser_get_filter(chooser) == mdzFilter
+                    ? mdviewer::DocumentFormat::Mdz
+                    : mdviewer::DocumentFormat::Markdown;
+                const std::string extension = LowerExtension(selection.path);
+                if (extension == ".mdz") {
+                    selection.format = mdviewer::DocumentFormat::Mdz;
+                } else if (extension == ".md" || extension == ".markdown") {
+                    selection.format = mdviewer::DocumentFormat::Markdown;
+                }
+                selection.encoding = selection.format == mdviewer::DocumentFormat::Mdz
+                    ? mdviewer::TextEncoding::Utf8
+                    : EncodingFromChoice(
+                        gtk_file_chooser_get_choice(chooser, "encoding"));
+                result = std::move(selection);
                 g_free(name);
             }
         }
@@ -309,16 +430,30 @@ private:
         static_cast<LinuxShell*>(data)->ResizeBrowser();
     }
 
+    static gboolean OnFocusIn(GtkWidget* widget, GdkEventFocus* event, gpointer data) {
+        auto* self = static_cast<LinuxShell*>(data);
+        if (event->in && self->browser_) self->browser_->GetHost()->SetFocus(true);
+        return self->browser_ ? TRUE : FALSE;
+    }
+
     void ResizeBrowser() {
         if (!window_ || !browser_) return;
         GtkAllocation allocation{};
         gtk_widget_get_allocation(window_, &allocation);
         const CefWindowHandle handle = browser_->GetHost()->GetWindowHandle();
         if (handle) {
-            XResizeWindow(GDK_DISPLAY_XDISPLAY(gtk_widget_get_display(window_)),
-                          static_cast<Window>(handle),
-                          static_cast<unsigned int>((std::max)(1, allocation.width)),
-                          static_cast<unsigned int>((std::max)(1, allocation.height)));
+            Display* display = GDK_DISPLAY_XDISPLAY(gtk_widget_get_display(window_));
+            XWindowChanges changes{};
+            changes.x = 0;
+            changes.y = 0;
+            changes.width = (std::max)(1, allocation.width);
+            changes.height = (std::max)(1, allocation.height);
+            XConfigureWindow(display, static_cast<Window>(handle),
+                             CWX | CWY | CWWidth | CWHeight, &changes);
+            XMapWindow(display, static_cast<Window>(handle));
+            XFlush(display);
+            browser_->GetHost()->NotifyMoveOrResizeStarted();
+            browser_->GetHost()->NotifyScreenInfoChanged();
         }
     }
 
@@ -335,6 +470,7 @@ private:
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    CefScopedArgArray gtkArguments(argc, argv);
     CefMainArgs mainArguments(argc, argv);
     const auto subprocessApp = mdviewer::CreatePortableCefApp(nullptr);
     const int subprocessCode = CefExecuteProcess(mainArguments, subprocessApp, nullptr);
@@ -342,7 +478,6 @@ int main(int argc, char* argv[]) {
 
     XInitThreads();
     if (!std::getenv("GDK_BACKEND")) setenv("GDK_BACKEND", "x11", 0);
-    if (!gtk_init_check(&argc, &argv)) return 2;
 
     const auto executable = ExecutablePath();
     LinuxShell shell(executable);
@@ -353,7 +488,9 @@ int main(int argc, char* argv[]) {
     settings.multi_threaded_message_loop = false;
     settings.log_severity = LOGSEVERITY_WARNING;
     const auto cache = std::filesystem::path(g_get_user_cache_dir()) / "MdViewer" / "CEF";
-    std::filesystem::create_directories(cache);
+    std::error_code cacheError;
+    std::filesystem::create_directories(cache, cacheError);
+    if (cacheError) return 5;
     CefString(&settings.cache_path) = cache.string();
     CefString(&settings.root_cache_path) = cache.string();
     const std::string language = InitialLanguage();
@@ -362,6 +499,16 @@ int main(int argc, char* argv[]) {
 
     const auto app = mdviewer::CreatePortableCefApp(&shell);
     if (!CefInitialize(mainArguments, settings, app, nullptr)) return 3;
+
+    int gtkArgumentCount = argc;
+    char** gtkArgumentValues = gtkArguments.array();
+    if (!gtk_init_check(&gtkArgumentCount, &gtkArgumentValues)) {
+        CefShutdown();
+        return 2;
+    }
+    XSetErrorHandler(HandleXError);
+    XSetIOErrorHandler(HandleXIoError);
+
     if (!mdviewer::RegisterPortableResourceScheme(shell.Resources())) {
         CefShutdown();
         return 4;

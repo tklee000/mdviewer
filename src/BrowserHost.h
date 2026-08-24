@@ -15,6 +15,9 @@ struct PdfPrintSettings {
     bool landscape = false;
     bool printBackground = true;
     bool pageNumbers = false;
+    // One-based ranges accepted by Chromium, for example "1-3,5".
+    // Empty prints every page.
+    std::string pageRanges;
 };
 
 class BrowserHostDelegate {

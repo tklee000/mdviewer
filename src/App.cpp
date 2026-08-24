@@ -1,8 +1,11 @@
 #include "App.h"
 
+#include "DocxArchive.h"
 #include "FileAssociation.h"
+#include "HwpxArchive.h"
 #include "Json.h"
 #include "Localization.h"
+#include "PrinterService.h"
 #include "UiResourceProvider.h"
 #include "resource.h"
 
@@ -14,12 +17,16 @@
 #include <wincrypt.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cwctype>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -33,6 +40,57 @@ constexpr size_t kMaximumPdfPreviewSize = 512 * 1024 * 1024;
 constexpr DWORD kMainWindowStyle =
     WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
     WS_SYSMENU | WS_CLIPCHILDREN;
+
+std::optional<std::string> NormalizePdfPageRanges(std::string_view value) {
+    if (value.empty()) return std::string{};
+    if (value.size() > 128) return std::nullopt;
+    std::string normalized;
+    std::size_t position = 0;
+    while (position < value.size()) {
+        const std::size_t comma = value.find(',', position);
+        std::string_view part = value.substr(
+            position, comma == std::string_view::npos
+                ? value.size() - position : comma - position);
+        while (!part.empty() && std::isspace(
+            static_cast<unsigned char>(part.front()))) part.remove_prefix(1);
+        while (!part.empty() && std::isspace(
+            static_cast<unsigned char>(part.back()))) part.remove_suffix(1);
+        if (part.empty()) return std::nullopt;
+
+        const std::size_t hyphen = part.find('-');
+        if (hyphen != std::string_view::npos &&
+            part.find('-', hyphen + 1) != std::string_view::npos) {
+            return std::nullopt;
+        }
+        auto parsePage = [](std::string_view text) -> std::optional<unsigned int> {
+            while (!text.empty() && std::isspace(
+                static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+            while (!text.empty() && std::isspace(
+                static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
+            if (text.empty()) return std::nullopt;
+            unsigned int page = 0;
+            const auto parsed = std::from_chars(
+                text.data(), text.data() + text.size(), page);
+            if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+                page == 0 || page > 1000000) return std::nullopt;
+            return page;
+        };
+        const auto start = parsePage(part.substr(0, hyphen));
+        if (!start) return std::nullopt;
+        std::optional<unsigned int> end;
+        if (hyphen != std::string_view::npos) {
+            end = parsePage(part.substr(hyphen + 1));
+            if (!end || *start > *end) return std::nullopt;
+        }
+        if (!normalized.empty()) normalized.push_back(',');
+        normalized += std::to_string(*start);
+        if (end) normalized += "-" + std::to_string(*end);
+        if (comma == std::string_view::npos) break;
+        position = comma + 1;
+        if (position == value.size()) return std::nullopt;
+    }
+    return normalized;
+}
 
 std::wstring FileName(const std::wstring& path) {
     return path.empty() ? std::wstring{} : std::filesystem::path(path).filename().wstring();
@@ -366,6 +424,10 @@ DesktopApp::~DesktopApp() {
     if (googleDriveWorker_.joinable()) {
         googleDriveWorker_.request_stop();
         googleDriveWorker_.join();
+    }
+    if (printerWorker_.joinable()) {
+        printerWorker_.request_stop();
+        printerWorker_.join();
     }
     browserHost_.reset();
     if (resources_) resources_->SetPdfPreview(nullptr);
@@ -720,6 +782,16 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
             SendMessageW(window_, WM_NCLBUTTONDOWN, HTCAPTION,
                          MAKELPARAM(cursor.x, cursor.y));
         }
+    } else if (type == "printer.list") {
+        SendPrinters();
+    } else if (type == "printer.properties") {
+        const std::wstring printerName = json::Utf8ToWide(
+            json::GetString(message, "printerName").value_or(""), false);
+        if (!printerName.empty() && printerName.size() <= 1024) {
+            ShowPrinterProperties(printerName);
+        } else {
+            SendJson("{\"type\":\"printer.propertiesFailed\"}");
+        }
     } else if (type == "pdf.preview") {
         const auto requestId = json::GetInteger(message, "requestId");
         const std::string paper =
@@ -727,12 +799,19 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
         const std::string orientation =
             json::GetString(message, "orientation").value_or("");
         const auto margin = json::GetInteger(message, "marginMm");
+        const auto pageRanges = NormalizePdfPageRanges(
+            json::GetString(message, "pageRanges").value_or(""));
         if (!requestId || *requestId <= 0 ||
             (paper != "a4" && paper != "letter") ||
             (orientation != "portrait" && orientation != "landscape") ||
             !margin || (*margin != 0 && *margin != 10 && *margin != 20)) {
             SendJson("{\"type\":\"pdf.previewFailed\",\"requestId\":" +
                      std::to_string(requestId.value_or(0)) + "}");
+            return;
+        }
+        if (!pageRanges) {
+            SendJson("{\"type\":\"pdf.previewFailed\",\"requestId\":" +
+                     std::to_string(*requestId) + "}");
             return;
         }
         PdfPreviewRequest request;
@@ -747,6 +826,7 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
             json::GetBool(message, "printBackground").value_or(true);
         request.settings.pageNumbers =
             json::GetBool(message, "pageNumbers").value_or(false);
+        request.settings.pageRanges = *pageRanges;
         QueuePdfPreview(request);
     } else if (type == "pdf.previewClose") {
         ClosePdfPreview();
@@ -755,6 +835,24 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
         if (requestId && *requestId > 0) {
             SavePdfPreview(static_cast<std::uint64_t>(*requestId));
         }
+    } else if (type == "pdf.print") {
+        const auto requestId = json::GetInteger(message, "requestId");
+        const auto copies = json::GetInteger(message, "copies");
+        const std::wstring printerName = json::Utf8ToWide(
+            json::GetString(message, "printerName").value_or(""), false);
+        if (requestId && *requestId > 0 && copies && *copies >= 1 &&
+            *copies <= 999 && !printerName.empty() &&
+            printerName.size() <= 1024) {
+            PrintPdfPreview(static_cast<std::uint64_t>(*requestId),
+                            printerName,
+                            static_cast<std::uint32_t>(*copies));
+        } else {
+            SendJson("{\"type\":\"pdf.printFailed\"}");
+        }
+    } else if (type == "docx.export") {
+        ExportDocx(message);
+    } else if (type == "hwpx.export") {
+        ExportHwpx(message);
     } else if (type == "recent.open") {
         const std::string kind = json::GetString(message, "kind").value_or("");
         const std::wstring location = json::Utf8ToWide(
@@ -1393,6 +1491,7 @@ void DesktopApp::StartPdfPreview(PdfPreviewRequest request) {
     std::filesystem::remove(pdfPreviewTemporaryPath_, error);
     error.clear();
     pdfPrintInProgress_ = true;
+    activePdfPreviewSettings_ = request.settings;
     if (!browserHost_->PrintToPdf(request.requestId,
                                   pdfPreviewTemporaryPath_,
                                   request.settings)) {
@@ -1414,6 +1513,7 @@ void DesktopApp::FinishPdfPreview(std::uint64_t requestId,
         if (bytes && resources_) {
             pdfPreviewBytes_ = bytes;
             pdfPreviewRequestId_ = requestId;
+            pdfPreviewSettings_ = activePdfPreviewSettings_;
             resources_->SetPdfPreview(bytes);
             SendJson("{\"type\":\"pdf.previewReady\",\"requestId\":" +
                      std::to_string(requestId) +
@@ -1439,6 +1539,9 @@ void DesktopApp::ClosePdfPreview() {
     pendingPdfPreviewRequest_.reset();
     pdfPreviewRequestId_ = 0;
     pdfPreviewBytes_.reset();
+    printerPropertiesApplied_ = false;
+    printerPropertiesName_.clear();
+    printerDeviceMode_.clear();
     if (resources_) resources_->SetPdfPreview(nullptr);
 }
 
@@ -1464,6 +1567,215 @@ void DesktopApp::SavePdfPreview(std::uint64_t requestId) {
     }
     SendJson("{\"type\":\"pdf.saved\",\"path\":" +
              json::Quote(json::WideToUtf8(path)) + "}");
+}
+
+void DesktopApp::SendPrinters() {
+    printerPropertiesApplied_ = false;
+    printerPropertiesName_.clear();
+    printerDeviceMode_.clear();
+    std::vector<printer::PrinterInfo> printers;
+    const DWORD testLength = GetEnvironmentVariableW(
+        L"MDVIEWER_PRINT_TEST_PRINTERS", nullptr, 0);
+    if (testLength > 1 && testLength < 32768) {
+        std::wstring value(testLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_PRINT_TEST_PRINTERS", value.data(), testLength);
+        if (copied > 0 && copied < testLength) {
+            value.resize(copied);
+            std::size_t position = 0;
+            while (position <= value.size()) {
+                const std::size_t separator = value.find(L'|', position);
+                std::wstring name = value.substr(
+                    position, separator == std::wstring::npos
+                        ? value.size() - position : separator - position);
+                if (!name.empty() && name.size() <= 1024) {
+                    printers.push_back(
+                        {std::move(name), printers.empty()});
+                }
+                if (separator == std::wstring::npos) break;
+                position = separator + 1;
+            }
+        }
+    } else {
+        printers = printer::ListPrinters();
+    }
+
+    std::string message = "{\"type\":\"printer.listed\",\"printers\":[";
+    for (std::size_t index = 0; index < printers.size(); ++index) {
+        if (index) message += ',';
+        message += "{\"name\":" +
+            json::Quote(json::WideToUtf8(printers[index].name)) +
+            ",\"isDefault\":" +
+            std::string(printers[index].isDefault ? "true" : "false") + "}";
+    }
+    message += "]}";
+    SendJson(message);
+}
+
+bool DesktopApp::IsKnownPrinter(const std::wstring& printerName) const {
+    if (printerName.empty() || printerName.size() > 1024) return false;
+    const DWORD testLength = GetEnvironmentVariableW(
+        L"MDVIEWER_PRINT_TEST_PRINTERS", nullptr, 0);
+    if (testLength > 1 && testLength < 32768) {
+        std::wstring value(testLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_PRINT_TEST_PRINTERS", value.data(), testLength);
+        if (!copied || copied >= testLength) return false;
+        value.resize(copied);
+        std::size_t position = 0;
+        while (position <= value.size()) {
+            const std::size_t separator = value.find(L'|', position);
+            const std::wstring candidate = value.substr(
+                position, separator == std::wstring::npos
+                    ? value.size() - position : separator - position);
+            if (!_wcsicmp(candidate.c_str(), printerName.c_str())) return true;
+            if (separator == std::wstring::npos) break;
+            position = separator + 1;
+        }
+        return false;
+    }
+    const std::vector<printer::PrinterInfo> printers = printer::ListPrinters();
+    return std::any_of(
+        printers.begin(), printers.end(), [&](const printer::PrinterInfo& value) {
+            return !_wcsicmp(value.name.c_str(), printerName.c_str());
+        });
+}
+
+void DesktopApp::ShowPrinterProperties(std::wstring printerName) {
+    if (printerPropertiesInProgress_ || directPrintInProgress_ ||
+        !IsKnownPrinter(printerName)) {
+        SendJson("{\"type\":\"printer.propertiesFailed\"}");
+        return;
+    }
+
+    const DWORD testLength = GetEnvironmentVariableW(
+        L"MDVIEWER_PRINT_TEST_PROPERTIES", nullptr, 0);
+    if (testLength > 1 && testLength < 64) {
+        std::wstring value(testLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_PRINT_TEST_PROPERTIES", value.data(), testLength);
+        if (copied > 0 && copied < testLength) value.resize(copied);
+        else value.clear();
+        if (!_wcsicmp(value.c_str(), L"apply")) {
+            printerPropertiesApplied_ = true;
+            printerPropertiesName_ = printerName;
+            printerDeviceMode_.clear();
+            SendJson("{\"type\":\"printer.propertiesApplied\",\"printerName\":" +
+                     json::Quote(json::WideToUtf8(printerName)) + "}");
+        } else if (!_wcsicmp(value.c_str(), L"cancel")) {
+            SendJson("{\"type\":\"printer.propertiesCanceled\",\"printerName\":" +
+                     json::Quote(json::WideToUtf8(printerName)) + "}");
+        } else {
+            SendJson("{\"type\":\"printer.propertiesFailed\"}");
+        }
+        return;
+    }
+
+    printerPropertiesInProgress_ = true;
+    SendJson("{\"type\":\"printer.propertiesStarted\"}");
+    const std::vector<unsigned char> initial =
+        printerPropertiesApplied_ &&
+        !_wcsicmp(printerPropertiesName_.c_str(), printerName.c_str())
+            ? printerDeviceMode_ : std::vector<unsigned char>{};
+    printer::PrinterPropertiesResult result = printer::ShowPrinterProperties(
+        window_, printerName, initial);
+    printerPropertiesInProgress_ = false;
+    if (result.status == printer::PrinterPropertiesStatus::Applied) {
+        printerPropertiesApplied_ = true;
+        printerPropertiesName_ = printerName;
+        printerDeviceMode_ = std::move(result.deviceMode);
+        SendJson("{\"type\":\"printer.propertiesApplied\",\"printerName\":" +
+                 json::Quote(json::WideToUtf8(printerName)) + "}");
+    } else if (result.status == printer::PrinterPropertiesStatus::Canceled) {
+        SendJson("{\"type\":\"printer.propertiesCanceled\",\"printerName\":" +
+                 json::Quote(json::WideToUtf8(printerName)) + "}");
+    } else {
+        SendJson("{\"type\":\"printer.propertiesFailed\",\"message\":" +
+                 json::Quote(json::WideToUtf8(result.error)) + "}");
+    }
+}
+
+void DesktopApp::PrintPdfPreview(std::uint64_t requestId,
+                                 std::wstring printerName,
+                                 std::uint32_t copies) {
+    if (!pdfPreviewOpen_ || !pdfPreviewBytes_ ||
+        requestId != pdfPreviewRequestId_ || directPrintInProgress_) {
+        SendJson("{\"type\":\"pdf.printFailed\"}");
+        return;
+    }
+
+    if (!IsKnownPrinter(printerName)) {
+        SendJson("{\"type\":\"pdf.printFailed\"}");
+        return;
+    }
+
+    const DWORD testPathLength = GetEnvironmentVariableW(
+        L"MDVIEWER_PRINT_TEST_OUTPUT", nullptr, 0);
+    std::wstring testPath;
+    if (testPathLength > 1 && testPathLength < 32768) {
+        testPath.assign(testPathLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_PRINT_TEST_OUTPUT", testPath.data(), testPathLength);
+        if (copied > 0 && copied < testPathLength) {
+            testPath.resize(copied);
+        } else {
+            testPath.clear();
+        }
+    }
+
+    if (printerWorker_.joinable()) printerWorker_.join();
+    directPrintInProgress_ = true;
+    const auto bytes = pdfPreviewBytes_;
+    const PdfPrintSettings settings = pdfPreviewSettings_;
+    const std::wstring documentName = DocumentDisplayName();
+    const bool advancedSettingsApplied = printerPropertiesApplied_ &&
+        !_wcsicmp(printerPropertiesName_.c_str(), printerName.c_str());
+    const std::vector<unsigned char> deviceMode = advancedSettingsApplied
+        ? printerDeviceMode_ : std::vector<unsigned char>{};
+    printerWorker_ = std::jthread(
+        [this, bytes, settings, printerName = std::move(printerName), copies,
+         documentName, testPath = std::move(testPath), advancedSettingsApplied,
+         deviceMode](std::stop_token stopToken) {
+            printer::PrintResult result;
+            if (!testPath.empty()) {
+                result = printer::ValidatePdf(*bytes, stopToken);
+                if (result.success) {
+                    std::wstring writeError;
+                    if (!WritePdfFile(testPath, *bytes, &writeError)) {
+                        result.success = false;
+                        result.error = std::move(writeError);
+                    }
+                }
+            } else {
+                printer::PrintOptions options;
+                options.printerName = printerName;
+                options.documentName = documentName;
+                options.copies = copies;
+                options.paperWidthMillimeters = settings.paperWidthMillimeters;
+                options.paperHeightMillimeters = settings.paperHeightMillimeters;
+                options.landscape = settings.landscape;
+                options.deviceMode = deviceMode;
+                result = printer::PrintPdf(*bytes, options, stopToken);
+            }
+            PostToUi([this, result = std::move(result), printerName, copies,
+                      advancedSettingsApplied] {
+                directPrintInProgress_ = false;
+                if (result.success) {
+                    SendJson("{\"type\":\"pdf.printed\",\"printerName\":" +
+                             json::Quote(json::WideToUtf8(printerName)) +
+                             ",\"copies\":" + std::to_string(copies) +
+                             ",\"pageCount\":" +
+                             std::to_string(result.pageCount) +
+                             ",\"advancedSettings\":" +
+                             std::string(advancedSettingsApplied
+                                 ? "true" : "false") + "}");
+                } else {
+                    SendJson("{\"type\":\"pdf.printFailed\",\"message\":" +
+                             json::Quote(json::WideToUtf8(result.error)) + "}");
+                }
+            });
+        });
+    SendJson("{\"type\":\"pdf.printStarted\"}");
 }
 
 std::wstring DesktopApp::ChoosePdfFileToSave() const {
@@ -1554,6 +1866,433 @@ bool DesktopApp::WritePdfFile(const std::wstring& path,
     }
     const bool written = WriteAllBytes(file, bytes.data(), bytes.size()) &&
         FlushFileBuffers(file) != FALSE;
+    const DWORD writeError = written ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(file);
+    if (!written) {
+        DeleteFileW(temporary.c_str());
+        if (errorMessage) *errorMessage = LastErrorMessage(writeError);
+        return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD moveError = GetLastError();
+        DeleteFileW(temporary.c_str());
+        if (errorMessage) *errorMessage = LastErrorMessage(moveError);
+        return false;
+    }
+    return true;
+}
+
+void DesktopApp::ExportDocx(const std::string& message) {
+    const std::string documentXml =
+        json::GetString(message, "documentXml").value_or("");
+    const std::string title = json::GetString(message, "title").value_or("");
+    const std::string author = json::GetString(message, "author").value_or("");
+    const std::string font = json::GetString(message, "font").value_or("sans");
+    const std::string imageRecords =
+        json::GetString(message, "images").value_or("");
+    const std::string hyperlinkRecords =
+        json::GetString(message, "hyperlinks").value_or("");
+    const std::string listRecords =
+        json::GetString(message, "lists").value_or("");
+    if (documentXml.empty() || documentXml.size() > 32ull * 1024 * 1024 ||
+        title.size() > 4096 || author.size() > 2048 ||
+        (font != "serif" && font != "sans") ||
+        imageRecords.size() > 180ull * 1024 * 1024 ||
+        hyperlinkRecords.size() > 4ull * 1024 * 1024 ||
+        listRecords.size() > 64ull * 1024) {
+        SendJson("{\"type\":\"docx.saveFailed\"}");
+        return;
+    }
+
+    docx::Document exportDocument;
+    exportDocument.title = title;
+    exportDocument.author = author;
+    exportDocument.documentXml = documentXml;
+    exportDocument.sansSerif = font == "sans";
+
+    std::istringstream images(imageRecords);
+    std::string line;
+    while (std::getline(images, line)) {
+        if (line.empty()) continue;
+        const std::size_t separator = line.find('\t');
+        if (separator == std::string::npos) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        const auto decoded = DecodeImageDataUrl(line.substr(separator + 1));
+        if (!decoded) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        docx::Image image;
+        image.id = line.substr(0, separator);
+        image.mediaType = decoded->mimeType;
+        image.extension = json::WideToUtf8(decoded->extension);
+        image.bytes = decoded->bytes;
+        exportDocument.images.push_back(std::move(image));
+        if (exportDocument.images.size() > 128) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+    }
+
+    std::istringstream hyperlinks(hyperlinkRecords);
+    while (std::getline(hyperlinks, line)) {
+        if (line.empty()) continue;
+        const std::size_t separator = line.find('\t');
+        if (separator == std::string::npos) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        exportDocument.hyperlinks.push_back(
+            {line.substr(0, separator), line.substr(separator + 1)});
+        if (exportDocument.hyperlinks.size() > 512) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+    }
+
+    std::istringstream lists(listRecords);
+    while (std::getline(lists, line)) {
+        if (line.empty()) continue;
+        const std::size_t separator = line.find('\t');
+        if (separator == std::string::npos) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        const std::string kind = line.substr(0, separator);
+        const std::string startText = line.substr(separator + 1);
+        if ((kind != "ordered" && kind != "bullet") || startText.empty() ||
+            startText.size() > 7 || !std::all_of(
+                startText.begin(), startText.end(), [](unsigned char character) {
+                    return std::isdigit(character) != 0;
+                })) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        try {
+            const unsigned long start = std::stoul(startText);
+            if (start == 0 || start > 1000000) throw std::out_of_range("list start");
+            exportDocument.lists.push_back(
+                {kind == "ordered", static_cast<std::uint32_t>(start)});
+        } catch (const std::exception&) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+        if (exportDocument.lists.size() > 256) {
+            SendJson("{\"type\":\"docx.saveFailed\"}");
+            return;
+        }
+    }
+
+    const std::wstring path = ChooseDocxFileToSave();
+    if (path.empty()) {
+        SendJson("{\"type\":\"docx.saveCanceled\"}");
+        return;
+    }
+
+    std::string bytes;
+    std::wstring error;
+    if (!docx::BuildBytes(exportDocument, &bytes, &error) ||
+        !WriteDocxFile(path, bytes, &error)) {
+        ShowError(Localized("Could not export DOCX to {path}.",
+                            {{"path", json::WideToUtf8(path)}}) +
+                      L"\n" + error,
+                  Localized(L"DOCX export error"));
+        SendJson("{\"type\":\"docx.saveFailed\"}");
+        return;
+    }
+    SendJson("{\"type\":\"docx.saved\",\"path\":" +
+             json::Quote(json::WideToUtf8(path)) + "}");
+}
+
+std::wstring DesktopApp::ChooseDocxFileToSave() const {
+    const DWORD testPathLength = GetEnvironmentVariableW(
+        L"MDVIEWER_DOCX_TEST_OUTPUT", nullptr, 0);
+    if (testPathLength > 1 && testPathLength < 32768) {
+        std::wstring testPath(testPathLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_DOCX_TEST_OUTPUT", testPath.data(), testPathLength);
+        if (copied > 0 && copied < testPathLength) {
+            testPath.resize(copied);
+            return testPath;
+        }
+    }
+
+    std::filesystem::path documentName(DocumentDisplayName());
+    std::wstring suggested = documentName.stem().wstring();
+    if (suggested.empty()) suggested = Localized(L"Untitled");
+    suggested += L".docx";
+
+    IFileSaveDialog* dialog = nullptr;
+    const HRESULT created = CoCreateInstance(
+        CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (FAILED(created) || !dialog) {
+        std::vector<wchar_t> path(32768, L'\0');
+        std::copy_n(suggested.begin(),
+                    (std::min)(suggested.size(), path.size() - 1), path.begin());
+        std::wstring filter = Localized(L"Word documents") + L" (*.docx)";
+        filter.push_back(L'\0');
+        filter += L"*.docx";
+        filter.push_back(L'\0');
+        filter.push_back(L'\0');
+        const std::wstring title = Localized(L"Export DOCX");
+        OPENFILENAMEW fallback{sizeof(fallback)};
+        fallback.hwndOwner = window_;
+        fallback.lpstrFilter = filter.c_str();
+        fallback.lpstrFile = path.data();
+        fallback.nMaxFile = static_cast<DWORD>(path.size());
+        fallback.lpstrDefExt = L"docx";
+        fallback.lpstrTitle = title.c_str();
+        fallback.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
+                         OFN_EXPLORER | OFN_NOCHANGEDIR;
+        return GetSaveFileNameW(&fallback) ? std::wstring(path.data())
+                                           : std::wstring{};
+    }
+
+    const std::wstring title = Localized(L"Export DOCX");
+    const std::wstring type = Localized(L"Word documents") + L" (*.docx)";
+    const COMDLG_FILTERSPEC filters[] = {{type.c_str(), L"*.docx"}};
+    dialog->SetTitle(title.c_str());
+    dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetDefaultExtension(L"docx");
+    dialog->SetFileName(suggested.c_str());
+    FILEOPENDIALOGOPTIONS options{};
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST |
+                           FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR |
+                           FOS_STRICTFILETYPES);
+    }
+    if (document_.origin == DocumentOrigin::Local && !document_.path.empty()) {
+        const std::filesystem::path current(document_.path);
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                current.parent_path().c_str(), nullptr, IID_PPV_ARGS(&folder))) &&
+            folder) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+    }
+    if (FAILED(dialog->Show(window_))) {
+        dialog->Release();
+        return {};
+    }
+    IShellItem* result = nullptr;
+    PWSTR selectedPath = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&result)) && result) {
+        result->GetDisplayName(SIGDN_FILESYSPATH, &selectedPath);
+        result->Release();
+    }
+    dialog->Release();
+    if (!selectedPath) return {};
+    std::wstring path(selectedPath);
+    CoTaskMemFree(selectedPath);
+    return path;
+}
+
+bool DesktopApp::WriteDocxFile(const std::wstring& path,
+                               const std::string& bytes,
+                               std::wstring* errorMessage) const {
+    const std::wstring temporary = path + L".mdviewer." +
+        std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (errorMessage) *errorMessage = LastErrorMessage(GetLastError());
+        return false;
+    }
+    const bool written = WriteAll(file, bytes) && FlushFileBuffers(file) != FALSE;
+    const DWORD writeError = written ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(file);
+    if (!written) {
+        DeleteFileW(temporary.c_str());
+        if (errorMessage) *errorMessage = LastErrorMessage(writeError);
+        return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD moveError = GetLastError();
+        DeleteFileW(temporary.c_str());
+        if (errorMessage) *errorMessage = LastErrorMessage(moveError);
+        return false;
+    }
+    return true;
+}
+
+void DesktopApp::ExportHwpx(const std::string& message) {
+    const std::string sectionXml =
+        json::GetString(message, "sectionXml").value_or("");
+    const std::string previewText =
+        json::GetString(message, "previewText").value_or("");
+    const std::string title = json::GetString(message, "title").value_or("");
+    const std::string author = json::GetString(message, "author").value_or("");
+    const std::string font = json::GetString(message, "font").value_or("serif");
+    const std::string imageRecords =
+        json::GetString(message, "images").value_or("");
+    if (sectionXml.empty() || sectionXml.size() > 32ull * 1024 * 1024 ||
+        previewText.size() > 8ull * 1024 * 1024 || title.size() > 4096 ||
+        author.size() > 2048 || (font != "serif" && font != "sans") ||
+        imageRecords.size() > 180ull * 1024 * 1024) {
+        SendJson("{\"type\":\"hwpx.saveFailed\"}");
+        return;
+    }
+
+    hwpx::Document exportDocument;
+    exportDocument.title = title;
+    exportDocument.author = author;
+    exportDocument.sectionXml = sectionXml;
+    exportDocument.previewText = previewText;
+    exportDocument.sansSerif = font == "sans";
+
+    std::istringstream records(imageRecords);
+    std::string line;
+    while (std::getline(records, line)) {
+        if (line.empty()) continue;
+        const std::size_t separator = line.find('\t');
+        if (separator == std::string::npos) {
+            SendJson("{\"type\":\"hwpx.saveFailed\"}");
+            return;
+        }
+        const std::string id = line.substr(0, separator);
+        const auto decoded = DecodeImageDataUrl(line.substr(separator + 1));
+        if (!decoded) {
+            SendJson("{\"type\":\"hwpx.saveFailed\"}");
+            return;
+        }
+        hwpx::Image image;
+        image.id = id;
+        image.mediaType = decoded->mimeType;
+        image.extension = json::WideToUtf8(decoded->extension);
+        image.bytes = decoded->bytes;
+        exportDocument.images.push_back(std::move(image));
+        if (exportDocument.images.size() > 128) {
+            SendJson("{\"type\":\"hwpx.saveFailed\"}");
+            return;
+        }
+    }
+
+    const std::wstring path = ChooseHwpxFileToSave();
+    if (path.empty()) {
+        SendJson("{\"type\":\"hwpx.saveCanceled\"}");
+        return;
+    }
+
+    std::string bytes;
+    std::wstring error;
+    if (!hwpx::BuildBytes(exportDocument, &bytes, &error) ||
+        !WriteHwpxFile(path, bytes, &error)) {
+        ShowError(Localized("Could not export HWPX to {path}.",
+                            {{"path", json::WideToUtf8(path)}}) +
+                      L"\n" + error,
+                  Localized(L"HWPX export error"));
+        SendJson("{\"type\":\"hwpx.saveFailed\"}");
+        return;
+    }
+    SendJson("{\"type\":\"hwpx.saved\",\"path\":" +
+             json::Quote(json::WideToUtf8(path)) + "}");
+}
+
+std::wstring DesktopApp::ChooseHwpxFileToSave() const {
+    const DWORD testPathLength = GetEnvironmentVariableW(
+        L"MDVIEWER_HWPX_TEST_OUTPUT", nullptr, 0);
+    if (testPathLength > 1 && testPathLength < 32768) {
+        std::wstring testPath(testPathLength, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(
+            L"MDVIEWER_HWPX_TEST_OUTPUT", testPath.data(), testPathLength);
+        if (copied > 0 && copied < testPathLength) {
+            testPath.resize(copied);
+            return testPath;
+        }
+    }
+
+    std::filesystem::path documentName(DocumentDisplayName());
+    std::wstring suggested = documentName.stem().wstring();
+    if (suggested.empty()) suggested = Localized(L"Untitled");
+    suggested += L".hwpx";
+
+    IFileSaveDialog* dialog = nullptr;
+    const HRESULT created = CoCreateInstance(
+        CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (FAILED(created) || !dialog) {
+        std::vector<wchar_t> path(32768, L'\0');
+        std::copy_n(suggested.begin(),
+                    (std::min)(suggested.size(), path.size() - 1), path.begin());
+        std::wstring filter = Localized(L"HWPX files") + L" (*.hwpx)";
+        filter.push_back(L'\0');
+        filter += L"*.hwpx";
+        filter.push_back(L'\0');
+        filter.push_back(L'\0');
+        const std::wstring title = Localized(L"Export HWPX");
+        OPENFILENAMEW fallback{sizeof(fallback)};
+        fallback.hwndOwner = window_;
+        fallback.lpstrFilter = filter.c_str();
+        fallback.lpstrFile = path.data();
+        fallback.nMaxFile = static_cast<DWORD>(path.size());
+        fallback.lpstrDefExt = L"hwpx";
+        fallback.lpstrTitle = title.c_str();
+        fallback.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
+                         OFN_EXPLORER | OFN_NOCHANGEDIR;
+        return GetSaveFileNameW(&fallback) ? std::wstring(path.data())
+                                           : std::wstring{};
+    }
+
+    const std::wstring title = Localized(L"Export HWPX");
+    const std::wstring type = Localized(L"HWPX files") + L" (*.hwpx)";
+    const COMDLG_FILTERSPEC filters[] = {{type.c_str(), L"*.hwpx"}};
+    dialog->SetTitle(title.c_str());
+    dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetDefaultExtension(L"hwpx");
+    dialog->SetFileName(suggested.c_str());
+    FILEOPENDIALOGOPTIONS options{};
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST |
+                           FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR |
+                           FOS_STRICTFILETYPES);
+    }
+    if (document_.origin == DocumentOrigin::Local && !document_.path.empty()) {
+        const std::filesystem::path current(document_.path);
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                current.parent_path().c_str(), nullptr, IID_PPV_ARGS(&folder))) &&
+            folder) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+    }
+    if (FAILED(dialog->Show(window_))) {
+        dialog->Release();
+        return {};
+    }
+    IShellItem* result = nullptr;
+    PWSTR selectedPath = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&result)) && result) {
+        result->GetDisplayName(SIGDN_FILESYSPATH, &selectedPath);
+        result->Release();
+    }
+    dialog->Release();
+    if (!selectedPath) return {};
+    std::wstring path(selectedPath);
+    CoTaskMemFree(selectedPath);
+    return path;
+}
+
+bool DesktopApp::WriteHwpxFile(const std::wstring& path,
+                               const std::string& bytes,
+                               std::wstring* errorMessage) const {
+    const std::wstring temporary = path + L".mdviewer." +
+        std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (errorMessage) *errorMessage = LastErrorMessage(GetLastError());
+        return false;
+    }
+    const bool written = WriteAll(file, bytes) && FlushFileBuffers(file) != FALSE;
     const DWORD writeError = written ? ERROR_SUCCESS : GetLastError();
     CloseHandle(file);
     if (!written) {

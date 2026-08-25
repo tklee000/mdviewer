@@ -75,6 +75,8 @@ private:
         std::shared_ptr<mdz::Entries> mdzEntries;
         std::string mdzEntryPoint;
         std::map<std::string, mdz::Bytes> mdzManagedAssets;
+        std::string mdzPassword;
+        bool mdzPasswordDirty = false;
         bool dirty = false;
         bool crlf = true;
         TextEncoding encoding = TextEncoding::Utf8;
@@ -91,6 +93,12 @@ private:
     struct PdfPreviewRequest {
         std::uint64_t requestId = 0;
         PdfPrintSettings settings;
+    };
+
+    struct PendingMdzPasswordRequest {
+        std::wstring displayName;
+        bool incorrect = false;
+        std::function<void(std::string)> submit;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message,
@@ -143,12 +151,25 @@ private:
                                bool activateCurrentWindow);
     bool LaunchNewWindow(const std::wstring& path);
     bool OpenDocument(const std::wstring& path, bool confirmCurrent = true);
+    bool OpenDocumentWithPassword(const std::wstring& path,
+                                  const std::string& password);
+    void OpenGoogleDriveFile(std::shared_ptr<GoogleDriveFile> file,
+                             const std::string& password = {});
+    void RequestMdzPassword(
+        std::wstring displayName, bool incorrect,
+        std::function<void(std::string)> submit);
+    void SendMdzPasswordRequest();
+    void ChangeMdzPassword(const std::string& password);
     bool ReadDocument(const std::wstring& path, Document* result,
-                      std::wstring* errorMessage) const;
+                      std::wstring* errorMessage,
+                      const std::string& password = {},
+                      mdz::ReadStatus* readStatus = nullptr) const;
     bool DecodeDocumentBytes(std::string bytes, Document* result,
                              std::wstring* errorMessage) const;
     bool DecodeMdzBytes(std::string bytes, Document* result,
-                        std::wstring* errorMessage) const;
+                        std::wstring* errorMessage,
+                        const std::string& password = {},
+                        mdz::ReadStatus* readStatus = nullptr) const;
     bool BuildDocumentBytes(const Document& document, std::string* bytes,
                             std::wstring* errorMessage) const;
     void EmbedImageInMdz(const std::string& dataUrl,
@@ -222,6 +243,7 @@ private:
     std::jthread googleDriveWorker_;
     bool googleDriveSaveInProgress_ = false;
     std::function<void()> pendingGoogleDriveSaveContinuation_;
+    std::optional<PendingMdzPasswordRequest> pendingMdzPasswordRequest_;
     bool pdfPreviewOpen_ = false;
     bool pdfPrintInProgress_ = false;
     std::uint64_t pdfPreviewRequestId_ = 0;

@@ -180,6 +180,40 @@ int main() {
                            package.entries.at("images/pixel.png"),
                        "MDZ image bytes round-trip");
 
+        const std::string password = "MDZ 암호 2026";
+        std::string encryptedArchive;
+        okay &= Expect(mdz::BuildBytes(
+                           package, &encryptedArchive, &archiveError, password),
+                       "password-protected MDZ archive is built");
+        okay &= Expect(encryptedArchive.size() > 30 &&
+                           (static_cast<unsigned char>(encryptedArchive[6]) & 1u) != 0 &&
+                           static_cast<unsigned char>(encryptedArchive[8]) == 99 &&
+                           static_cast<unsigned char>(encryptedArchive[9]) == 0,
+                       "MDZ entries use the WinZip AES ZIP method and flag");
+        mdz::ReadStatus readStatus = mdz::ReadStatus::Error;
+        okay &= Expect(!mdz::ReadBytes(encryptedArchive, &reopened,
+                                      &archiveError, {}, &readStatus) &&
+                           readStatus == mdz::ReadStatus::PasswordRequired,
+                       "encrypted MDZ requires a password");
+        okay &= Expect(!mdz::ReadBytes(encryptedArchive, &reopened,
+                                      &archiveError, "wrong", &readStatus) &&
+                           readStatus == mdz::ReadStatus::IncorrectPassword,
+                       "encrypted MDZ rejects an incorrect password");
+        okay &= Expect(mdz::ReadBytes(encryptedArchive, &reopened,
+                                     &archiveError, password, &readStatus) &&
+                           readStatus == mdz::ReadStatus::Success &&
+                           reopened.entries.at("index.md") ==
+                               package.entries.at("index.md"),
+                       "encrypted MDZ reopens with the correct password");
+        std::string decryptedArchive;
+        okay &= Expect(mdz::BuildBytes(
+                           reopened, &decryptedArchive, &archiveError, {}) &&
+                           mdz::ReadBytes(decryptedArchive, &reopened,
+                                          &archiveError, {}, &readStatus) &&
+                           readStatus == mdz::ReadStatus::Success &&
+                           (static_cast<unsigned char>(decryptedArchive[6]) & 1u) == 0,
+                       "blank password removes MDZ encryption on save");
+
         mdz::Package unsafe = package;
         unsafe.entries["../outside.png"] = {1, 2, 3};
         std::string rejected;

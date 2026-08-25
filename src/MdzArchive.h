@@ -15,6 +15,13 @@ struct Package {
     std::string entryPoint;
 };
 
+enum class ReadStatus {
+    Success,
+    PasswordRequired,
+    IncorrectPassword,
+    Error,
+};
+
 constexpr const char* kMimeType = "application/vnd.mdzip";
 
 bool IsMdzPath(const std::wstring& path);
@@ -24,8 +31,11 @@ Package CreateDocument(const std::string& markdown,
                        const std::string& title = {});
 
 bool ReadBytes(const std::string& bytes, Package* package,
-               std::wstring* errorMessage);
+               std::wstring* errorMessage,
+               const std::string& password = {},
+               ReadStatus* status = nullptr);
 bool BuildBytes(const Package& package, std::string* bytes,
-                std::wstring* errorMessage);
+                std::wstring* errorMessage,
+                const std::string& password = {});
 
 }  // namespace mdz

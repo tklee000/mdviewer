@@ -41,6 +41,8 @@
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="file.save" data-i18n="&amp;Save	Ctrl+S">&amp;Save</button>
             <button type="button" role="menuitem" data-menu-command="file.saveAs" data-i18n="Save &amp;As...	Ctrl+Shift+S">Save &amp;As...</button>
+            <button type="button" role="menuitem" data-menu-command="file.mdzPassword"
+                    data-i18n="MDZ &amp;Password...">MDZ &amp;Password...</button>
             <button type="button" role="menuitem" data-menu-command="file.saveGoogleDriveAs"
                     class="provider-menu-item">
               <span class="google-drive-mark" aria-hidden="true">
@@ -414,6 +416,31 @@
       <footer class="settings-dialog-actions">
         <button type="button" data-google-drive-save-cancel data-i18n="Cancel">Cancel</button>
         <button class="primary" type="submit" data-i18n="Save to Drive">Save to Drive</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="mdz-password-dialog" class="settings-dialog insert-dialog"
+          aria-labelledby="mdz-password-dialog-title">
+    <form id="mdz-password-form" method="dialog">
+      <header class="settings-dialog-header">
+        <h2 id="mdz-password-dialog-title" data-i18n="MDZ password">MDZ password</h2>
+        <button class="dialog-close-button" type="button" data-mdz-password-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+      <div class="insert-dialog-body">
+        <p id="mdz-password-description" class="dialog-hint"></p>
+        <label class="dialog-field">
+          <span data-i18n="Password">Password</span>
+          <input id="mdz-password-input" type="password" maxlength="1024"
+                 autocomplete="current-password" spellcheck="false">
+        </label>
+        <p id="mdz-password-hint" class="dialog-hint"
+           data-i18n="Leave the password blank and save the MDZ again to remove encryption.">Leave the password blank and save the MDZ again to remove encryption.</p>
+      </div>
+      <footer class="settings-dialog-actions">
+        <button type="button" data-mdz-password-cancel data-i18n="Cancel">Cancel</button>
+        <button id="mdz-password-submit" class="primary" type="submit"
+                data-i18n="Apply">Apply</button>
       </footer>
     </form>
   </dialog>

@@ -200,12 +200,16 @@ if(BUILD_TESTING)
     src/MdzArchive.cpp
     src/MdzArchive.h
     src/libmzip/common.h
+    src/libmzip/aes256_aesni.cpp
+    src/libmzip/aes256_aesni.h
     src/libmzip/crc32.cpp
     src/libmzip/crc32.h
     src/libmzip/deflate_decoder.cpp
     src/libmzip/deflate_decoder.h
     src/libmzip/deflate_encoder.cpp
     src/libmzip/deflate_encoder.h
+    src/libmzip/crypto.cpp
+    src/libmzip/crypto.h
     src/libmzip/match.h
     src/libmzip/match_avx2.cpp
     src/libmzip/match_scalar.cpp

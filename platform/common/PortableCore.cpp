@@ -557,6 +557,7 @@ void EditorController::OnWebMessage(const std::string& message) {
         SendInitialState();
         Send(std::string("{\"type\":\"window.stateChanged\",\"maximized\":") +
              (platform_.IsWindowMaximized() ? "true}" : "false}"));
+        SendMdzPasswordRequest();
         return;
     }
     if (*type == "document.changed") {
@@ -583,6 +584,24 @@ void EditorController::OnWebMessage(const std::string& message) {
     }
     if (*type == "editor.modeChanged") {
         if (const auto mode = JsonString(message, "mode")) editorMode_ = *mode;
+        return;
+    }
+    if (*type == "mdz.passwordChanged") {
+        const std::string password = JsonString(message, "password").value_or("");
+        if (password.size() <= 1024) ChangeMdzPassword(password);
+        return;
+    }
+    if (*type == "mdz.passwordResponse") {
+        const std::string password = JsonString(message, "password").value_or("");
+        if (!pendingMdzPath_ || password.empty() || password.size() > 1024) return;
+        const auto path = *pendingMdzPath_;
+        pendingMdzPath_.reset();
+        OpenDocument(path, password);
+        return;
+    }
+    if (*type == "mdz.passwordCanceled") {
+        pendingMdzPath_.reset();
+        pendingMdzPasswordIncorrect_ = false;
         return;
     }
     if (*type == "settings.languageChanged") {
@@ -650,7 +669,8 @@ bool EditorController::ConfirmDiscardOrSave() {
     return SaveDocument(false);
 }
 
-bool EditorController::OpenDocument(const std::filesystem::path& path) {
+bool EditorController::OpenDocument(const std::filesystem::path& path,
+                                    const std::string& password) {
     std::string loaded;
     TextEncoding encoding = TextEncoding::Utf8;
     bool usedCrLf = false;
@@ -666,7 +686,17 @@ bool EditorController::OpenDocument(const std::filesystem::path& path) {
         }
         mdz::Package package;
         std::wstring archiveError;
-        if (!mdz::ReadBytes(bytes, &package, &archiveError)) {
+        mdz::ReadStatus readStatus = mdz::ReadStatus::Error;
+        if (!mdz::ReadBytes(bytes, &package, &archiveError,
+                            password, &readStatus)) {
+            if (readStatus == mdz::ReadStatus::PasswordRequired ||
+                readStatus == mdz::ReadStatus::IncorrectPassword) {
+                pendingMdzPath_ = path;
+                pendingMdzPasswordIncorrect_ =
+                    readStatus == mdz::ReadStatus::IncorrectPassword;
+                SendMdzPasswordRequest();
+                return true;
+            }
             platform_.ShowError("Open failed", NarrowError(archiveError));
             return false;
         }
@@ -690,6 +720,10 @@ bool EditorController::OpenDocument(const std::filesystem::path& path) {
     format_ = format;
     usedCrLf_ = usedCrLf;
     archive_ = std::move(archive);
+    mdzPassword_ = format == DocumentFormat::Mdz ? password : std::string{};
+    mdzPasswordDirty_ = false;
+    pendingMdzPath_.reset();
+    pendingMdzPasswordIncorrect_ = false;
     dirty_ = false;
     editorMode_ = "preview";
     if (archive_) {
@@ -723,6 +757,9 @@ bool EditorController::SaveDocument(bool forceSaveAs) {
     std::string error;
     bool saved = false;
     std::shared_ptr<mdz::Package> savedArchive;
+    const std::string savedMdzPassword =
+        destinationFormat == DocumentFormat::Mdz &&
+        format_ == DocumentFormat::Mdz ? mdzPassword_ : std::string{};
     if (destinationFormat == DocumentFormat::Mdz) {
         mdz::Package package = archive_
             ? *archive_
@@ -732,7 +769,8 @@ bool EditorController::SaveDocument(bool forceSaveAs) {
             mdz::Bytes(markdown.begin(), markdown.end());
         std::string bytes;
         std::wstring archiveError;
-        if (!mdz::BuildBytes(package, &bytes, &archiveError)) {
+        if (!mdz::BuildBytes(package, &bytes, &archiveError,
+                             savedMdzPassword)) {
             error = NarrowError(archiveError);
         } else if ((saved = WriteFileBytes(destination, bytes, error))) {
             savedArchive = std::make_shared<mdz::Package>(std::move(package));
@@ -751,6 +789,9 @@ bool EditorController::SaveDocument(bool forceSaveAs) {
     encoding_ = destinationEncoding;
     format_ = destinationFormat;
     archive_ = std::move(savedArchive);
+    mdzPassword_ = destinationFormat == DocumentFormat::Mdz
+        ? savedMdzPassword : std::string{};
+    mdzPasswordDirty_ = false;
     dirty_ = false;
     if (archive_) {
         resources_->SetDocumentArchive(
@@ -772,6 +813,8 @@ void EditorController::NewDocument() {
     format_ = DocumentFormat::Markdown;
     usedCrLf_ = false;
     archive_.reset();
+    mdzPassword_.clear();
+    mdzPasswordDirty_ = false;
     editorMode_ = "preview";
     resources_->SetDocumentDirectory({});
     UpdateTitle();
@@ -780,6 +823,29 @@ void EditorController::NewDocument() {
 
 void EditorController::SendInitialState() {
     SendDocumentState("app.init");
+}
+
+void EditorController::SendMdzPasswordRequest() {
+    if (!ready_ || !pendingMdzPath_) return;
+    Send("{\"type\":\"mdz.passwordRequired\",\"name\":" +
+         JsonQuote(DisplayNameFor(*pendingMdzPath_)) +
+         ",\"incorrect\":" +
+         (pendingMdzPasswordIncorrect_ ? "true}" : "false}"));
+}
+
+void EditorController::ChangeMdzPassword(const std::string& password) {
+    if (format_ != DocumentFormat::Mdz || password.size() > 1024) return;
+    const bool changed = password != mdzPassword_;
+    if (changed) {
+        mdzPassword_ = password;
+        mdzPasswordDirty_ = true;
+        dirty_ = true;
+        UpdateTitle();
+    }
+    Send("{\"type\":\"mdz.passwordChanged\",\"encrypted\":" +
+         std::string(mdzPassword_.empty() ? "false" : "true") +
+         ",\"changed\":" + (changed ? "true" : "false") +
+         ",\"dirty\":" + (dirty_ ? "true}" : "false}"));
 }
 
 void EditorController::SendDocumentState(const char* messageType) {
@@ -792,6 +858,8 @@ void EditorController::SendDocumentState(const char* messageType) {
          ",\"name\":" + JsonQuote(DisplayNameFor(path_)) +
          ",\"text\":" + JsonQuote(text_) +
          ",\"dirty\":" + (dirty_ ? "true" : "false") +
+         ",\"mdzEncrypted\":" + (!mdzPassword_.empty() ? "true" : "false") +
+         ",\"mdzPasswordDirty\":" + (mdzPasswordDirty_ ? "true" : "false") +
          ",\"format\":" + JsonQuote(format_ == DocumentFormat::Mdz
              ? "mdz" : "markdown") +
          ",\"encoding\":" + JsonQuote(EncodingName(encoding_)) + ",\"eol\":" +

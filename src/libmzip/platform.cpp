@@ -189,7 +189,7 @@ void WritableMappedFile::flush() {
             result = ::msync(data_, static_cast<size_t>(size_), MS_SYNC);
         } while (result != 0 && errno == EINTR);
         if (result != 0) {
-            throw std::runtime_error("Cannot flush mapped output view: " +
+            throw std::runtime_error(std::string("Cannot flush mapped output view: ") +
                                      std::strerror(errno));
         }
     }
@@ -199,7 +199,7 @@ void WritableMappedFile::flush() {
             result = ::fsync(fd_);
         } while (result != 0 && errno == EINTR);
         if (result != 0) {
-            throw std::runtime_error("Cannot flush mapped output file: " +
+            throw std::runtime_error(std::string("Cannot flush mapped output file: ") +
                                      std::strerror(errno));
         }
     }
@@ -339,7 +339,8 @@ std::string path_to_utf8(const std::filesystem::path& path) {
                         out.data(), n, nullptr, nullptr);
     return out;
 #else
-    return path.u8string();
+    const std::u8string encoded = path.u8string();
+    return std::string(encoded.begin(), encoded.end());
 #endif
 }
 

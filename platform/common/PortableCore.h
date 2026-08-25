@@ -95,9 +95,12 @@ public:
 
 private:
     bool ConfirmDiscardOrSave();
-    bool OpenDocument(const std::filesystem::path& path);
+    bool OpenDocument(const std::filesystem::path& path,
+                      const std::string& password = {});
     bool SaveDocument(bool forceSaveAs);
     void NewDocument();
+    void SendMdzPasswordRequest();
+    void ChangeMdzPassword(const std::string& password);
     void SendInitialState();
     void SendDocumentState(const char* messageType);
     void SendSettings();
@@ -118,6 +121,10 @@ private:
     DocumentFormat format_ = DocumentFormat::Markdown;
     bool usedCrLf_ = false;
     std::shared_ptr<mdz::Package> archive_;
+    std::string mdzPassword_;
+    bool mdzPasswordDirty_ = false;
+    std::optional<std::filesystem::path> pendingMdzPath_;
+    bool pendingMdzPasswordIncorrect_ = false;
 };
 
 std::string JsonQuote(const std::string& value);

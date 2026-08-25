@@ -42,6 +42,8 @@
     path: "",
     origin: "local",
     format: "markdown",
+    mdzEncrypted: false,
+    mdzPasswordDirty: false,
     name: "Untitled",
     dirty: false,
     encoding: "UTF-8",
@@ -89,6 +91,7 @@
   let preferredPrinterName = "";
   let docxExportBusy = false;
   let hwpxExportBusy = false;
+  let mdzPasswordDialogMode = "settings";
   const splitMinimumWidth = 860;
 
   function activeEditorMode() {
@@ -1921,7 +1924,8 @@
 
   function markChanged() {
     if (state.applying) return;
-    state.dirty = state.savedText === null || state.text !== state.savedText ||
+    state.dirty = state.mdzPasswordDirty || state.savedText === null ||
+      state.text !== state.savedText ||
       state.eol !== state.savedEol;
     updateChrome();
     post("document.changed", {
@@ -1981,6 +1985,9 @@
         item.hidden = !state.googleDriveAvailable;
         item.disabled = state.googleDriveBusy;
       });
+    $$('[data-menu-command="file.mdzPassword"]').forEach((item) => {
+      item.disabled = state.format !== "mdz";
+    });
     updateHeadingChrome();
     updateFormattingChrome();
     updatePosition();
@@ -2032,6 +2039,8 @@
     state.path = documentState.path || "";
     state.origin = documentState.origin === "googleDrive" ? "googleDrive" : "local";
     state.format = documentState.format === "mdz" ? "mdz" : "markdown";
+    state.mdzEncrypted = Boolean(documentState.mdzEncrypted);
+    state.mdzPasswordDirty = Boolean(documentState.mdzPasswordDirty);
     state.name = documentState.name || i18n.t("Untitled");
     state.text = documentState.text || "";
     state.dirty = Boolean(documentState.dirty);
@@ -2919,6 +2928,48 @@
     });
   }
 
+  function showMdzPasswordDialog(mode, options = {}) {
+    const dialog = $("#mdz-password-dialog");
+    const input = $("#mdz-password-input");
+    mdzPasswordDialogMode = mode;
+    dialog.dataset.mode = mode;
+    dialog.dataset.incorrect = String(mode === "open" && Boolean(options.incorrect));
+    input.value = "";
+    input.setCustomValidity("");
+    input.required = mode === "open";
+    input.autocomplete = mode === "open" ? "current-password" : "new-password";
+    $("#mdz-password-hint").hidden = mode === "open";
+    if (mode === "open") {
+      $("#mdz-password-dialog-title").textContent = i18n.t("Enter MDZ password");
+      $("#mdz-password-description").textContent = options.incorrect
+        ? i18n.t("The password is incorrect. Try again.")
+        : i18n.t("Enter the password to open {name}.", { name: options.name || "MDZ" });
+      $("#mdz-password-submit").textContent = i18n.t("Open");
+    } else {
+      $("#mdz-password-dialog-title").textContent = i18n.t("MDZ password");
+      $("#mdz-password-description").textContent = i18n.t(state.mdzEncrypted
+        ? "The MDZ is currently password protected."
+        : "The MDZ currently has no password.");
+      $("#mdz-password-submit").textContent = i18n.t("Apply");
+    }
+    if (!dialog.open) dialog.showModal();
+    requestAnimationFrame(() => input.focus());
+  }
+
+  function openMdzPasswordSettings() {
+    if (state.format !== "mdz") return;
+    showMdzPasswordDialog("settings");
+  }
+
+  function cancelMdzPasswordDialog() {
+    const dialog = $("#mdz-password-dialog");
+    if (!dialog.open) return;
+    const notifyNative = mdzPasswordDialogMode === "open";
+    $("#mdz-password-input").value = "";
+    dialog.close("cancel");
+    if (notifyNative) post("mdz.passwordCanceled");
+  }
+
   function executeMenuCommand(name) {
     if (name === "file.print") {
       openPrintDialog();
@@ -2926,6 +2977,8 @@
       openExportDialog();
     } else if (name === "file.saveGoogleDriveAs") {
       openGoogleDriveSaveDialog();
+    } else if (name === "file.mdzPassword") {
+      openMdzPasswordSettings();
     } else if (name.startsWith("file.") || name.startsWith("app.")) {
       post("command", { name });
     } else if (name.startsWith("edit.")) {
@@ -3148,6 +3201,34 @@
       button.addEventListener("click", () => googleDriveSaveDialog.close("cancel")));
     googleDriveSaveDialog.addEventListener("click", (event) => {
       if (event.target === googleDriveSaveDialog) googleDriveSaveDialog.close("cancel");
+    });
+
+    const mdzPasswordDialog = $("#mdz-password-dialog");
+    const mdzPasswordInput = $("#mdz-password-input");
+    mdzPasswordInput.addEventListener("input", () =>
+      mdzPasswordInput.setCustomValidity(""));
+    $("#mdz-password-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const password = mdzPasswordInput.value;
+      if (mdzPasswordDialogMode === "open" && !password) {
+        mdzPasswordInput.setCustomValidity(i18n.t("Enter a password."));
+        mdzPasswordInput.reportValidity();
+        return;
+      }
+      const type = mdzPasswordDialogMode === "open"
+        ? "mdz.passwordResponse" : "mdz.passwordChanged";
+      mdzPasswordInput.value = "";
+      mdzPasswordDialog.close("submit");
+      post(type, { password });
+    });
+    $$('[data-mdz-password-cancel]').forEach((button) =>
+      button.addEventListener("click", cancelMdzPasswordDialog));
+    mdzPasswordDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      cancelMdzPasswordDialog();
+    });
+    mdzPasswordDialog.addEventListener("click", (event) => {
+      if (event.target === mdzPasswordDialog) cancelMdzPasswordDialog();
     });
 
     const pdfExportDialog = $("#pdf-export-dialog");
@@ -3516,9 +3597,11 @@
         setMode(message.mode || "preview", false);
       } else if (message.type === "document.saved") {
         state.dirty = false;
+        state.mdzPasswordDirty = false;
         state.path = message.document?.path || state.path;
         state.origin = message.document?.origin || state.origin;
         state.format = message.document?.format === "mdz" ? "mdz" : "markdown";
+        state.mdzEncrypted = Boolean(message.document?.mdzEncrypted);
         state.name = message.document?.name || state.name;
         state.encoding = message.document?.encoding || state.encoding;
         state.eol = message.document?.eol || state.eol;
@@ -3533,6 +3616,8 @@
         state.path = documentState.path || "";
         state.origin = documentState.origin === "googleDrive" ? "googleDrive" : "local";
         state.format = documentState.format === "mdz" ? "mdz" : "markdown";
+        state.mdzEncrypted = Boolean(documentState.mdzEncrypted);
+        state.mdzPasswordDirty = Boolean(documentState.mdzPasswordDirty);
         state.name = documentState.name || state.name;
         state.encoding = documentState.encoding || state.encoding;
         state.eol = documentState.eol || state.eol;
@@ -3540,7 +3625,21 @@
           ? message.savedText : state.savedText;
         state.savedEol = message.savedEol === "LF" ? "LF" : "CRLF";
         state.dirty = state.text !== state.savedText || state.eol !== state.savedEol;
+        state.dirty = state.mdzPasswordDirty || state.dirty;
         updateChrome();
+      } else if (message.type === "mdz.passwordRequired") {
+        showMdzPasswordDialog("open", {
+          name: message.name || "MDZ",
+          incorrect: Boolean(message.incorrect)
+        });
+      } else if (message.type === "mdz.passwordChanged") {
+        state.mdzEncrypted = Boolean(message.encrypted);
+        if (message.changed) state.mdzPasswordDirty = true;
+        state.dirty = Boolean(message.dirty) || state.mdzPasswordDirty;
+        updateChrome();
+        showToast(i18n.t(state.mdzEncrypted
+          ? "The MDZ password will be applied when you save."
+          : "The MDZ password will be removed when you save."), "info");
       } else if (message.type === "recent.changed") {
         populateRecentDocuments(message.documents);
       } else if (message.type === "googleDrive.busy") {

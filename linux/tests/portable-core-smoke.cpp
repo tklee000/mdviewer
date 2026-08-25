@@ -117,6 +117,26 @@ int main() {
     if (!Require(savedMarkdown == markdown,
                  "Saved MDZ Markdown text changed unexpectedly")) return 1;
 
+    controller.OnWebMessage(
+        "{\"type\":\"mdz.passwordChanged\",\"password\":\"portable-secret\"}");
+    controller.OnWebMessage("{\"type\":\"command\",\"name\":\"file.save\"}");
+    mdz::ReadStatus protectedStatus = mdz::ReadStatus::Error;
+    if (!Require(!mdz::ReadBytes(ReadBytes(mdzPath), &package, &mdzError,
+                                {}, &protectedStatus) &&
+                 protectedStatus == mdz::ReadStatus::PasswordRequired,
+                 "Portable controller did not encrypt the MDZ after setting a password")) {
+        return 1;
+    }
+    if (!Require(mdz::ReadBytes(ReadBytes(mdzPath), &package, &mdzError,
+                                "portable-secret", &protectedStatus),
+                 "Portable controller password did not reopen the MDZ")) return 1;
+    controller.OnWebMessage(
+        "{\"type\":\"mdz.passwordChanged\",\"password\":\"\"}");
+    controller.OnWebMessage("{\"type\":\"command\",\"name\":\"file.save\"}");
+    if (!Require(mdz::ReadBytes(ReadBytes(mdzPath), &package, &mdzError,
+                                {}, &protectedStatus),
+                 "Blank portable MDZ password did not remove encryption")) return 1;
+
     package.entries["images/pixel.png"] = mdz::Bytes{0x89, 'P', 'N', 'G'};
     package.entries[package.entryPoint] = mdz::Bytes{
         '!', '[', 'x', ']', '(', 'i', 'm', 'a', 'g', 'e', 's', '/',
@@ -152,6 +172,45 @@ int main() {
                  asset->bytes == std::string("\x89PNG", 4),
                  "MDZ relative image asset was not served")) return 1;
 
+    const auto protectedPath = temporary / "protected.mdz";
+    std::string protectedBytes;
+    if (!Require(mdz::BuildBytes(package, &protectedBytes, &mdzError,
+                                 "open-secret") &&
+                 WriteBytes(protectedPath, protectedBytes),
+                 "Could not prepare the protected portable MDZ")) return 1;
+    FakePlatform protectedPlatform;
+    auto protectedResources =
+        std::make_shared<mdviewer::FileResourceProvider>(temporary);
+    mdviewer::EditorController protectedController(
+        protectedPlatform, protectedResources, "ko-KR", "light");
+    std::vector<std::string> protectedMessages;
+    protectedController.SetSender([&](const std::string& message) {
+        protectedMessages.push_back(message);
+    });
+    if (!Require(protectedController.OpenInitialFile(protectedPath),
+                 "Protected portable MDZ open was not queued")) return 1;
+    protectedController.OnWebMessage("{\"type\":\"ready\"}");
+    if (!Require(!protectedMessages.empty() &&
+                 protectedMessages.back().find("mdz.passwordRequired") !=
+                     std::string::npos,
+                 "Protected portable MDZ did not request a password")) return 1;
+    protectedController.OnWebMessage(
+        "{\"type\":\"mdz.passwordResponse\",\"password\":\"wrong\"}");
+    if (!Require(protectedMessages.back().find("\"incorrect\":true") !=
+                     std::string::npos,
+                 "Incorrect portable MDZ password did not request another attempt")) {
+        return 1;
+    }
+    protectedController.OnWebMessage(
+        "{\"type\":\"mdz.passwordResponse\",\"password\":\"open-secret\"}");
+    if (!Require(protectedMessages.back().find("\"type\":\"document.opened\"") !=
+                     std::string::npos &&
+                 protectedMessages.back().find("\"format\":\"mdz\"") !=
+                     std::string::npos &&
+                 protectedMessages.back().find("\"mdzEncrypted\":true") !=
+                     std::string::npos,
+                 "Correct portable MDZ password did not open the document")) return 1;
+
     const auto utf16BePath = temporary / "roundtrip.md";
     reopenPlatform.nextSave = mdviewer::SaveSelection{
         utf16BePath, mdviewer::TextEncoding::Utf16Be,
@@ -164,7 +223,8 @@ int main() {
                  static_cast<unsigned char>(utf16BeBytes[1]) == 0xFF,
                  "UTF-16 BE save did not write its BOM")) return 1;
 
-    if (!Require(platform.errors.empty() && reopenPlatform.errors.empty(),
+    if (!Require(platform.errors.empty() && reopenPlatform.errors.empty() &&
+                 protectedPlatform.errors.empty(),
                  "A document operation reported an unexpected error")) return 1;
     std::filesystem::remove_all(temporary, filesystemError);
     std::cout << "portable core MDZ/encoding smoke test passed\n";

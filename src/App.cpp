@@ -723,6 +723,7 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
         SendDocumentState();
         SendRecentDocuments();
         SendWindowState();
+        SendMdzPasswordRequest();
     } else if (type == "document.changed") {
         const std::string text = json::GetString(message, "text").value_or(document_.text);
         bool changed = false;
@@ -751,6 +752,20 @@ void DesktopApp::HandleBrowserMessage(const std::string& message) {
             json::GetString(message, "dataUrl").value_or(""),
             json::GetString(message, "fileName").value_or(""),
             json::GetString(message, "alt").value_or(""));
+    } else if (type == "mdz.passwordChanged") {
+        const std::string password =
+            json::GetString(message, "password").value_or("");
+        if (password.size() <= 1024) ChangeMdzPassword(password);
+    } else if (type == "mdz.passwordResponse") {
+        const std::string password =
+            json::GetString(message, "password").value_or("");
+        if (!pendingMdzPasswordRequest_ || password.empty() ||
+            password.size() > 1024) return;
+        auto submit = std::move(pendingMdzPasswordRequest_->submit);
+        pendingMdzPasswordRequest_.reset();
+        if (submit) submit(password);
+    } else if (type == "mdz.passwordCanceled") {
+        pendingMdzPasswordRequest_.reset();
     } else if (type == "command") {
         const std::string name = json::GetString(message, "name").value_or("");
         if (name == "file.new") NewDocument();
@@ -884,6 +899,38 @@ void DesktopApp::SendJson(const std::string& value) {
     if (browserHost_ && browserReady_) browserHost_->SendJson(value);
 }
 
+void DesktopApp::RequestMdzPassword(
+    std::wstring displayName, bool incorrect,
+    std::function<void(std::string)> submit) {
+    pendingMdzPasswordRequest_ = PendingMdzPasswordRequest{
+        std::move(displayName), incorrect, std::move(submit)};
+    SendMdzPasswordRequest();
+}
+
+void DesktopApp::SendMdzPasswordRequest() {
+    if (!browserReady_ || !pendingMdzPasswordRequest_) return;
+    SendJson("{\"type\":\"mdz.passwordRequired\",\"name\":" +
+             json::Quote(json::WideToUtf8(
+                 pendingMdzPasswordRequest_->displayName)) +
+             ",\"incorrect\":" +
+             (pendingMdzPasswordRequest_->incorrect ? "true}" : "false}"));
+}
+
+void DesktopApp::ChangeMdzPassword(const std::string& password) {
+    if (document_.format != DocumentFormat::Mdz || password.size() > 1024) return;
+    const bool changed = password != document_.mdzPassword;
+    if (changed) {
+        document_.mdzPassword = password;
+        document_.mdzPasswordDirty = true;
+        document_.dirty = true;
+        UpdateWindowTitle();
+    }
+    SendJson("{\"type\":\"mdz.passwordChanged\",\"encrypted\":" +
+             std::string(document_.mdzPassword.empty() ? "false" : "true") +
+             ",\"changed\":" + (changed ? "true" : "false") +
+             ",\"dirty\":" + (document_.dirty ? "true}" : "false}"));
+}
+
 void DesktopApp::SendDocumentState(const char* type) {
     if (!browserReady_) return;
     const std::string path = json::WideToUtf8(document_.path);
@@ -900,9 +947,13 @@ void DesktopApp::SendDocumentState(const char* type) {
                  document_.origin == DocumentOrigin::GoogleDrive
                      ? "googleDrive" : "local") +
              ",\"driveFileId\":" + json::Quote(document_.driveFileId) +
-             ",\"text\":" + json::Quote(document_.text) +
-             ",\"dirty\":" + (document_.dirty ? "true" : "false") +
-             ",\"encoding\":" + json::Quote(json::WideToUtf8(EncodingName(document_.encoding))) +
+              ",\"text\":" + json::Quote(document_.text) +
+              ",\"dirty\":" + (document_.dirty ? "true" : "false") +
+              ",\"mdzEncrypted\":" +
+                  (!document_.mdzPassword.empty() ? "true" : "false") +
+              ",\"mdzPasswordDirty\":" +
+                  (document_.mdzPasswordDirty ? "true" : "false") +
+              ",\"encoding\":" + json::Quote(json::WideToUtf8(EncodingName(document_.encoding))) +
              ",\"eol\":" + json::Quote(document_.crlf ? "CRLF" : "LF") + "}}");
 }
 
@@ -1131,9 +1182,25 @@ bool DesktopApp::OpenDocument(const std::wstring& path, bool confirmCurrent) {
         auto continuation = [this, path] { OpenDocument(path, false); };
         if (!ConfirmSaveChanges(continuation)) return false;
     }
+    return OpenDocumentWithPassword(path, {});
+}
+
+bool DesktopApp::OpenDocumentWithPassword(const std::wstring& path,
+                                          const std::string& password) {
     Document loaded;
     std::wstring error;
-    if (!ReadDocument(path, &loaded, &error)) {
+    mdz::ReadStatus readStatus = mdz::ReadStatus::Error;
+    if (!ReadDocument(path, &loaded, &error, password, &readStatus)) {
+        if (readStatus == mdz::ReadStatus::PasswordRequired ||
+            readStatus == mdz::ReadStatus::IncorrectPassword) {
+            RequestMdzPassword(
+                std::filesystem::path(path).filename().wstring(),
+                readStatus == mdz::ReadStatus::IncorrectPassword,
+                [this, path](std::string suppliedPassword) {
+                    OpenDocumentWithPassword(path, suppliedPassword);
+                });
+            return true;
+        }
         ShowError(Localized("Could not open {path}.",
                             {{"path", json::WideToUtf8(path)}}) + L"\n" + error,
                   Localized(L"File open error"));
@@ -1151,7 +1218,9 @@ bool DesktopApp::OpenDocument(const std::wstring& path, bool confirmCurrent) {
 }
 
 bool DesktopApp::ReadDocument(const std::wstring& path, Document* result,
-                              std::wstring* errorMessage) const {
+                              std::wstring* errorMessage,
+                              const std::string& password,
+                              mdz::ReadStatus* readStatus) const {
     if (!result) return false;
     std::error_code sizeError;
     const std::uintmax_t fileSize = std::filesystem::file_size(path, sizeError);
@@ -1176,7 +1245,8 @@ bool DesktopApp::ReadDocument(const std::wstring& path, Document* result,
                       std::istreambuf_iterator<char>());
     Document loaded;
     const bool decoded = mdz::IsMdzPath(path)
-        ? DecodeMdzBytes(std::move(bytes), &loaded, errorMessage)
+        ? DecodeMdzBytes(std::move(bytes), &loaded, errorMessage,
+                         password, readStatus)
         : DecodeDocumentBytes(std::move(bytes), &loaded, errorMessage);
     if (!decoded) return false;
     loaded.origin = DocumentOrigin::Local;
@@ -1241,10 +1311,14 @@ bool DesktopApp::DecodeDocumentBytes(std::string bytes, Document* result,
 }
 
 bool DesktopApp::DecodeMdzBytes(std::string bytes, Document* result,
-                                std::wstring* errorMessage) const {
+                                std::wstring* errorMessage,
+                                const std::string& password,
+                                mdz::ReadStatus* readStatus) const {
     if (!result) return false;
     mdz::Package package;
-    if (!mdz::ReadBytes(bytes, &package, errorMessage)) return false;
+    if (!mdz::ReadBytes(bytes, &package, errorMessage, password, readStatus)) {
+        return false;
+    }
     const auto entry = package.entries.find(package.entryPoint);
     if (entry == package.entries.end()) {
         if (errorMessage) *errorMessage = L"The MDZ Markdown entry is missing.";
@@ -1262,6 +1336,7 @@ bool DesktopApp::DecodeMdzBytes(std::string bytes, Document* result,
     loaded.mdzEntryPoint = package.entryPoint;
     loaded.mdzEntries = std::make_shared<mdz::Entries>(
         std::move(package.entries));
+    loaded.mdzPassword = password;
     *result = std::move(loaded);
     return true;
 }
@@ -1291,7 +1366,8 @@ bool DesktopApp::BuildDocumentBytes(const Document& document,
             json::WideToUtf8(DocumentDisplayName()));
     }
     package.entries[package.entryPoint] = mdz::Bytes(text.begin(), text.end());
-    return mdz::BuildBytes(package, bytes, errorMessage);
+    return mdz::BuildBytes(package, bytes, errorMessage,
+                           document.mdzPassword);
 }
 
 void DesktopApp::EmbedImageInMdz(const std::string& dataUrl,
@@ -1361,6 +1437,7 @@ bool DesktopApp::SaveDocument() {
     }
     SynchronizeMdzEntry();
     document_.dirty = false;
+    document_.mdzPasswordDirty = false;
     std::error_code timeError;
     document_.diskWriteTime =
         std::filesystem::last_write_time(document_.path, timeError);
@@ -1382,6 +1459,8 @@ bool DesktopApp::SaveDocumentAs() {
     const auto previousMdzEntries = document_.mdzEntries;
     const std::string previousMdzEntryPoint = document_.mdzEntryPoint;
     const auto previousMdzManagedAssets = document_.mdzManagedAssets;
+    const std::string previousMdzPassword = document_.mdzPassword;
+    const bool previousMdzPasswordDirty = document_.mdzPasswordDirty;
     const std::string previousDriveFileId = document_.driveFileId;
     const std::string previousDriveName = document_.driveName;
     const std::string previousDriveMimeType = document_.driveMimeType;
@@ -1404,10 +1483,14 @@ bool DesktopApp::SaveDocumentAs() {
         document_.mdzEntries = std::make_shared<mdz::Entries>(
             std::move(package.entries));
         document_.mdzManagedAssets.clear();
+        document_.mdzPassword.clear();
+        document_.mdzPasswordDirty = false;
     } else if (document_.format == DocumentFormat::Markdown) {
         document_.mdzEntries.reset();
         document_.mdzEntryPoint.clear();
         document_.mdzManagedAssets.clear();
+        document_.mdzPassword.clear();
+        document_.mdzPasswordDirty = false;
     }
     if (!SaveDocument()) {
         document_.origin = previousOrigin;
@@ -1421,6 +1504,8 @@ bool DesktopApp::SaveDocumentAs() {
         document_.mdzEntries = previousMdzEntries;
         document_.mdzEntryPoint = previousMdzEntryPoint;
         document_.mdzManagedAssets = previousMdzManagedAssets;
+        document_.mdzPassword = previousMdzPassword;
+        document_.mdzPasswordDirty = previousMdzPasswordDirty;
         return false;
     }
     UpdateDocumentResources();
@@ -2399,36 +2484,51 @@ void DesktopApp::BeginGoogleDriveDownload(const std::string& fileId) {
             }
             auto file = std::make_shared<GoogleDriveFile>(
                 std::move(*result.value));
-            auto openDownloaded = [this, file] {
-                Document loaded;
-                std::wstring decodeError;
-                const bool decoded = mdz::IsMdzPath(
-                    json::Utf8ToWide(file->name, false))
-                    ? DecodeMdzBytes(std::move(file->bytes), &loaded, &decodeError)
-                    : DecodeDocumentBytes(std::move(file->bytes),
-                                          &loaded, &decodeError);
-                if (!decoded) {
-                    ShowError(decodeError, Localized(L"Google Drive error"));
-                    return;
-                }
-                loaded.origin = DocumentOrigin::GoogleDrive;
-                loaded.path.clear();
-                loaded.driveFileId = file->id;
-                loaded.driveName = file->name;
-                loaded.driveMimeType = file->mimeType;
-                loaded.driveModifiedTime = file->modifiedTime;
-                document_ = std::move(loaded);
-                ++documentGeneration_;
-                editorMode_ = "preview";
-                externalChangeReported_ = false;
-                UpdateDocumentResources();
-                UpdateWindowTitle();
-                RememberCurrentDocument();
-                SendDocumentState("document.opened");
-            };
+            auto openDownloaded = [this, file] { OpenGoogleDriveFile(file); };
             if (ConfirmSaveChanges(openDownloaded)) openDownloaded();
         });
     });
+}
+
+void DesktopApp::OpenGoogleDriveFile(std::shared_ptr<GoogleDriveFile> file,
+                                     const std::string& password) {
+    if (!file) return;
+    Document loaded;
+    std::wstring decodeError;
+    mdz::ReadStatus readStatus = mdz::ReadStatus::Error;
+    const bool decoded = mdz::IsMdzPath(
+        json::Utf8ToWide(file->name, false))
+        ? DecodeMdzBytes(file->bytes, &loaded, &decodeError,
+                         password, &readStatus)
+        : DecodeDocumentBytes(file->bytes, &loaded, &decodeError);
+    if (!decoded) {
+        if (readStatus == mdz::ReadStatus::PasswordRequired ||
+            readStatus == mdz::ReadStatus::IncorrectPassword) {
+            RequestMdzPassword(
+                json::Utf8ToWide(file->name, false),
+                readStatus == mdz::ReadStatus::IncorrectPassword,
+                [this, file](std::string suppliedPassword) {
+                    OpenGoogleDriveFile(file, suppliedPassword);
+                });
+            return;
+        }
+        ShowError(decodeError, Localized(L"Google Drive error"));
+        return;
+    }
+    loaded.origin = DocumentOrigin::GoogleDrive;
+    loaded.path.clear();
+    loaded.driveFileId = file->id;
+    loaded.driveName = file->name;
+    loaded.driveMimeType = file->mimeType;
+    loaded.driveModifiedTime = file->modifiedTime;
+    document_ = std::move(loaded);
+    ++documentGeneration_;
+    editorMode_ = "preview";
+    externalChangeReported_ = false;
+    UpdateDocumentResources();
+    UpdateWindowTitle();
+    RememberCurrentDocument();
+    SendDocumentState("document.opened");
 }
 
 void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
@@ -2438,6 +2538,7 @@ void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
     const TextEncoding sourceEncoding = document_.encoding;
     const DocumentFormat sourceFormat = document_.format;
     const auto sourceMdzEntries = document_.mdzEntries;
+    const std::string sourceMdzPassword = document_.mdzPassword;
     const std::uint64_t generation = documentGeneration_;
     Document snapshot = document_;
     snapshot.format = mdz::IsMdzPath(json::Utf8ToWide(fileName, false))
@@ -2454,16 +2555,20 @@ void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
         snapshot.mdzEntries = std::make_shared<mdz::Entries>(
             std::move(package.entries));
         snapshot.mdzManagedAssets.clear();
+        snapshot.mdzPassword.clear();
     } else if (snapshot.format == DocumentFormat::Markdown) {
         snapshot.mdzEntries.reset();
         snapshot.mdzEntryPoint.clear();
         snapshot.mdzManagedAssets.clear();
+        snapshot.mdzPassword.clear();
     }
+    snapshot.mdzPasswordDirty = false;
     const DocumentFormat snapshotFormat = snapshot.format;
     const TextEncoding snapshotEncoding = snapshot.encoding;
     const auto snapshotMdzEntries = snapshot.mdzEntries;
     const std::string snapshotMdzEntryPoint = snapshot.mdzEntryPoint;
     const auto snapshotMdzManagedAssets = snapshot.mdzManagedAssets;
+    const std::string snapshotMdzPassword = snapshot.mdzPassword;
     const std::string uploadMimeType = snapshotFormat == DocumentFormat::Mdz
         ? mdz::kMimeType : "text/markdown";
     std::string bytes;
@@ -2477,18 +2582,20 @@ void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
     if (!StartGoogleDriveOperation(
         [this, fileName = std::move(fileName),
          parentFolderId = std::move(parentFolderId), bytes = std::move(bytes),
-         snapshotText, snapshotCrlf, sourceEncoding, sourceFormat,
-         sourceMdzEntries, snapshotFormat, snapshotEncoding,
-         snapshotMdzEntries, snapshotMdzEntryPoint, snapshotMdzManagedAssets,
-         uploadMimeType, generation](
+          snapshotText, snapshotCrlf, sourceEncoding, sourceFormat,
+          sourceMdzEntries, sourceMdzPassword, snapshotFormat, snapshotEncoding,
+          snapshotMdzEntries, snapshotMdzEntryPoint, snapshotMdzManagedAssets,
+          snapshotMdzPassword, uploadMimeType, generation](
             std::stop_token stopToken) mutable {
             auto result = googleDrive_.CreateMarkdownFile(
                 fileName, parentFolderId, bytes, uploadMimeType, stopToken);
             PostToUi(
                 [this, generation, snapshotText, snapshotCrlf,
-                 sourceEncoding, sourceFormat, sourceMdzEntries,
-                 snapshotFormat, snapshotEncoding, snapshotMdzEntries,
-                 snapshotMdzEntryPoint, snapshotMdzManagedAssets, uploadMimeType,
+                  sourceEncoding, sourceFormat, sourceMdzEntries,
+                  sourceMdzPassword,
+                  snapshotFormat, snapshotEncoding, snapshotMdzEntries,
+                  snapshotMdzEntryPoint, snapshotMdzManagedAssets,
+                  snapshotMdzPassword, uploadMimeType,
                  result = std::move(result)]() mutable {
                     FinishGoogleDriveOperation();
                     googleDriveSaveInProgress_ = false;
@@ -2514,7 +2621,8 @@ void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
                         document_.crlf == snapshotCrlf &&
                         document_.encoding == sourceEncoding &&
                         document_.format == sourceFormat &&
-                        document_.mdzEntries == sourceMdzEntries;
+                        document_.mdzEntries == sourceMdzEntries &&
+                        document_.mdzPassword == sourceMdzPassword;
                     document_.origin = DocumentOrigin::GoogleDrive;
                     if (snapshotStillCurrent || snapshotFormat != sourceFormat) {
                         document_.format = snapshotFormat;
@@ -2522,6 +2630,8 @@ void DesktopApp::BeginGoogleDriveCreate(std::string fileName,
                         document_.mdzEntries = snapshotMdzEntries;
                         document_.mdzEntryPoint = snapshotMdzEntryPoint;
                         document_.mdzManagedAssets = snapshotMdzManagedAssets;
+                        document_.mdzPassword = snapshotMdzPassword;
+                        document_.mdzPasswordDirty = false;
                     }
                     document_.path.clear();
                     document_.driveFileId = result.value->id;
@@ -2564,6 +2674,7 @@ void DesktopApp::BeginGoogleDriveSave(std::function<void()> afterSave,
     const TextEncoding snapshotEncoding = document_.encoding;
     const DocumentFormat snapshotFormat = document_.format;
     const auto snapshotMdzEntries = document_.mdzEntries;
+    const std::string snapshotMdzPassword = document_.mdzPassword;
     const std::string fileId = document_.driveFileId;
     const std::string expectedModifiedTime = document_.driveModifiedTime;
     const std::string mimeType = document_.driveMimeType.empty()
@@ -2579,15 +2690,16 @@ void DesktopApp::BeginGoogleDriveSave(std::function<void()> afterSave,
     googleDriveSaveInProgress_ = true;
     if (!StartGoogleDriveOperation(
         [this, fileId, mimeType, expectedModifiedTime, bytes = std::move(bytes),
-         snapshotText, snapshotCrlf, snapshotEncoding, overwriteConflict,
-         snapshotFormat, snapshotMdzEntries,
+          snapshotText, snapshotCrlf, snapshotEncoding, overwriteConflict,
+          snapshotFormat, snapshotMdzEntries, snapshotMdzPassword,
          afterSave = std::move(afterSave)](std::stop_token stopToken) mutable {
             auto result = googleDrive_.UploadFile(
                 fileId, bytes, mimeType, expectedModifiedTime,
                 overwriteConflict, stopToken);
             PostToUi(
                 [this, fileId, snapshotText, snapshotCrlf, snapshotEncoding,
-                 snapshotFormat, snapshotMdzEntries,
+                  snapshotFormat, snapshotMdzEntries,
+                  snapshotMdzPassword,
                  result = std::move(result),
                  afterSave = std::move(afterSave)]() mutable {
                     FinishGoogleDriveOperation();
@@ -2628,7 +2740,8 @@ void DesktopApp::BeginGoogleDriveSave(std::function<void()> afterSave,
                         document_.crlf == snapshotCrlf &&
                         document_.encoding == snapshotEncoding &&
                         document_.format == snapshotFormat &&
-                        document_.mdzEntries == snapshotMdzEntries;
+                        document_.mdzEntries == snapshotMdzEntries &&
+                        document_.mdzPassword == snapshotMdzPassword;
                     if (!snapshotStillCurrent) {
                         document_.dirty = true;
                         pendingGoogleDriveSaveContinuation_ = {};
@@ -2638,6 +2751,7 @@ void DesktopApp::BeginGoogleDriveSave(std::function<void()> afterSave,
                         return;
                     }
                     document_.dirty = false;
+                    document_.mdzPasswordDirty = false;
                     SynchronizeMdzEntry();
                     UpdateWindowTitle();
                     RememberCurrentDocument();
@@ -2667,9 +2781,13 @@ void DesktopApp::SendGoogleDriveSavedSnapshot(
                      ? "googleDrive" : "local") +
              ",\"encoding\":" +
                  json::Quote(json::WideToUtf8(EncodingName(document_.encoding))) +
-             ",\"eol\":" + json::Quote(document_.crlf ? "CRLF" : "LF") +
-             ",\"dirty\":" + (document_.dirty ? "true" : "false") +
-             "},\"savedText\":" + json::Quote(savedText) +
+              ",\"eol\":" + json::Quote(document_.crlf ? "CRLF" : "LF") +
+              ",\"dirty\":" + (document_.dirty ? "true" : "false") +
+              ",\"mdzEncrypted\":" +
+                  (!document_.mdzPassword.empty() ? "true" : "false") +
+              ",\"mdzPasswordDirty\":" +
+                  (document_.mdzPasswordDirty ? "true" : "false") +
+              "},\"savedText\":" + json::Quote(savedText) +
              ",\"savedEol\":" + json::Quote(savedCrlf ? "CRLF" : "LF") +
              "}");
 }

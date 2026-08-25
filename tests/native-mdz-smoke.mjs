@@ -103,6 +103,28 @@ function unzip(bytes) {
   return entries;
 }
 
+function zipEntryHeaders(bytes) {
+  let end = bytes.length - 22;
+  while (end >= 0 && bytes.readUInt32LE(end) !== 0x06054B50) end -= 1;
+  if (end < 0) throw new Error("ZIP end record missing");
+  const count = bytes.readUInt16LE(end + 10);
+  let cursor = bytes.readUInt32LE(end + 16);
+  const entries = [];
+  for (let index = 0; index < count; index += 1) {
+    assert.equal(bytes.readUInt32LE(cursor), 0x02014B50, "central ZIP signature");
+    const nameLength = bytes.readUInt16LE(cursor + 28);
+    const extraLength = bytes.readUInt16LE(cursor + 30);
+    const commentLength = bytes.readUInt16LE(cursor + 32);
+    entries.push({
+      flags: bytes.readUInt16LE(cursor + 8),
+      method: bytes.readUInt16LE(cursor + 10),
+      name: bytes.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8")
+    });
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
 async function freePort() {
   const server = createServer();
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
@@ -136,6 +158,7 @@ const debuggingPort = await freePort();
 const app = spawn(executable, [
   "--new-window", `--remote-debugging-port=${debuggingPort}`, mdzPath
 ], { stdio: "ignore", windowsHide: true });
+let reopenApp;
 let socket;
 let nextId = 1;
 const pending = new Map();
@@ -235,12 +258,95 @@ try {
     "redo restores the compressed image entry");
   assert.equal([...saved.values()].every((entry) => entry.method === 8), true,
     "every MdViewer-written MDZ entry uses DEFLATE");
-  console.log("MdViewer native MDZ save/image/undo/redo smoke tests passed.");
+
+  await evaluate(`(() => {
+    document.querySelector('[data-menu-command="file.mdzPassword"]').click();
+    document.querySelector('#mdz-password-input').value = 'native-secret';
+    document.querySelector('#mdz-password-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate("!document.querySelector('#dirty-indicator').hidden"),
+    "Setting the native MDZ password did not mark the document dirty");
+  await evaluate("document.querySelector('[data-menu-command=\"file.save\"]').click()");
+  await waitFor(() => evaluate("document.querySelector('#dirty-indicator').hidden"),
+    "Password-protected native MDZ save did not finish");
+  const encryptedHeaders = zipEntryHeaders(await readFile(mdzPath));
+  assert.equal(encryptedHeaders.length > 0 && encryptedHeaders.every((entry) =>
+    (entry.flags & 1) !== 0 && entry.method === 99), true,
+  "native MDZ save encrypts every entry with WinZip AES");
+
+  socket.close();
+  socket = undefined;
+  spawnSync("taskkill.exe", ["/PID", String(app.pid), "/T", "/F"],
+    { stdio: "ignore", windowsHide: true });
+  const reopenPort = await freePort();
+  reopenApp = spawn(executable, [
+    "--new-window", `--remote-debugging-port=${reopenPort}`, mdzPath
+  ], { stdio: "ignore", windowsHide: true });
+  let reopenTarget;
+  await waitFor(async () => {
+    try {
+      const targets = await (await fetch(
+        `http://127.0.0.1:${reopenPort}/json/list`)).json();
+      reopenTarget = targets.find((entry) => entry.type === "page");
+      return Boolean(reopenTarget);
+    } catch {
+      return false;
+    }
+  }, "Protected MDZ test app did not expose a page");
+  socket = new WebSocket(reopenTarget.webSocketDebuggerUrl);
+  await new Promise((resolveOpen, rejectOpen) => {
+    socket.addEventListener("open", resolveOpen, { once: true });
+    socket.addEventListener("error", rejectOpen, { once: true });
+  });
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    if (!message.id || !pending.has(message.id)) return;
+    const request = pending.get(message.id);
+    pending.delete(message.id);
+    if (message.error) request.rejectMessage(new Error(message.error.message));
+    else request.resolveMessage(message.result);
+  });
+  await send("Runtime.enable");
+  await waitFor(() => evaluate("document.querySelector('#mdz-password-dialog')?.open"),
+    "Opening a protected MDZ did not request its password");
+  await evaluate(`(() => {
+    document.querySelector('#mdz-password-input').value = 'wrong';
+    document.querySelector('#mdz-password-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate(`document.querySelector('#mdz-password-dialog')?.open &&
+    document.querySelector('#mdz-password-dialog').dataset.incorrect === 'true'`),
+  "Incorrect native MDZ password did not request another attempt");
+  await evaluate(`(() => {
+    document.querySelector('#mdz-password-input').value = 'native-secret';
+    document.querySelector('#mdz-password-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate(
+    "document.querySelector('#encoding-status')?.textContent === 'MDZ · UTF-8' && " +
+    "!document.querySelector('#mdz-password-dialog').open"),
+  "Correct native MDZ password did not open the document");
+  await evaluate(`(() => {
+    document.querySelector('[data-menu-command="file.mdzPassword"]').click();
+    document.querySelector('#mdz-password-input').value = '';
+    document.querySelector('#mdz-password-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate("!document.querySelector('#dirty-indicator').hidden"),
+    "Clearing the native MDZ password did not mark the document dirty");
+  await evaluate("document.querySelector('[data-menu-command=\"file.save\"]').click()");
+  await waitFor(() => evaluate("document.querySelector('#dirty-indicator').hidden"),
+    "Native MDZ password removal save did not finish");
+  saved = unzip(await readFile(mdzPath));
+  assert.equal([...saved.values()].every((entry) => entry.method === 8), true,
+    "blank password saves every native MDZ entry without encryption");
+  console.log("MdViewer native MDZ save/image/password/open/remove smoke tests passed.");
 } finally {
   try { socket?.close(); } catch { /* Ignore cleanup errors. */ }
   try {
     if (app.exitCode === null) {
       spawnSync("taskkill.exe", ["/PID", String(app.pid), "/T", "/F"],
+        { stdio: "ignore", windowsHide: true });
+    }
+    if (reopenApp?.exitCode === null) {
+      spawnSync("taskkill.exe", ["/PID", String(reopenApp.pid), "/T", "/F"],
         { stdio: "ignore", windowsHide: true });
     }
   } catch { /* Best-effort process cleanup. */ }

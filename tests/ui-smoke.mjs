@@ -1021,6 +1021,69 @@ try {
   await click('[data-editor-command="redo"]');
   assert.equal(await sourceValue(), "![cat](images/cat.png)", "image redo");
 
+  assert.equal(await evaluate(
+    "document.querySelector('[data-menu-command=\"file.mdzPassword\"]').disabled"),
+    true, "MDZ password menu is disabled for Markdown documents");
+  const mdzPasswordUi = await evaluate(`(async () => {
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'document.opened', mode: 'source', document: {
+        origin: 'local', format: 'mdz', path: 'C:\\\\docs\\\\bundle.mdz',
+        name: 'bundle.mdz', text: '', dirty: false, encoding: 'UTF-8', eol: 'LF'
+      }
+    } }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const messages = [];
+    const originalBridge = window.mdViewerNative;
+    window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };
+    const menu = document.querySelector('[data-menu-command="file.mdzPassword"]');
+    menu.click();
+    const settingsOpened = document.querySelector('#mdz-password-dialog').open;
+    document.querySelector('#mdz-password-input').value = 'secret-123';
+    document.querySelector('#mdz-password-form').requestSubmit();
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'mdz.passwordChanged', encrypted: true, changed: true, dirty: true
+    } }));
+    const dirtyAfterPassword = !document.querySelector('#dirty-indicator').hidden;
+    menu.click();
+    document.querySelector('#mdz-password-input').value = '';
+    document.querySelector('#mdz-password-form').requestSubmit();
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'mdz.passwordRequired', name: 'locked.mdz', incorrect: false
+    } }));
+    const promptOpened = document.querySelector('#mdz-password-dialog').open;
+    const promptRequired = document.querySelector('#mdz-password-input').required;
+    document.querySelector('#mdz-password-input').value = 'open-secret';
+    document.querySelector('#mdz-password-form').requestSubmit();
+    window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
+      type: 'mdz.passwordRequired', name: 'locked.mdz', incorrect: true
+    } }));
+    const incorrectMessage = document.querySelector('#mdz-password-description').textContent;
+    document.querySelector('[data-mdz-password-cancel]').click();
+    window.mdViewerNative = originalBridge;
+    return {
+      menuEnabled: !menu.disabled,
+      settingsOpened,
+      dirtyAfterPassword,
+      promptOpened,
+      promptRequired,
+      incorrectMessage,
+      messages
+    };
+  })()`);
+  assert.equal(mdzPasswordUi.menuEnabled, true, "MDZ password menu is enabled in MDZ mode");
+  assert.equal(mdzPasswordUi.settingsOpened, true, "MDZ password settings dialog opens");
+  assert.equal(mdzPasswordUi.dirtyAfterPassword, true, "password change marks the MDZ dirty");
+  assert.equal(mdzPasswordUi.promptOpened && mdzPasswordUi.promptRequired, true,
+    "encrypted MDZ open requests a required password");
+  assert.match(mdzPasswordUi.incorrectMessage, /incorrect/i,
+    "incorrect MDZ password requests another attempt");
+  assert.deepEqual(mdzPasswordUi.messages.map(message => [message.type, message.password]), [
+    ["mdz.passwordChanged", "secret-123"],
+    ["mdz.passwordChanged", ""],
+    ["mdz.passwordResponse", "open-secret"],
+    ["mdz.passwordCanceled", undefined]
+  ], "MDZ password dialog sends set, remove, open, and cancel messages");
+
   const mdzImageRequest = await evaluate(`(async () => {
     window.dispatchEvent(new CustomEvent('mdviewerhostmessage', { detail: {
       type: 'document.opened', mode: 'source', document: {
@@ -1028,6 +1091,7 @@ try {
         name: 'bundle.mdz', text: '', dirty: false, encoding: 'UTF-8', eol: 'LF'
       }
     } }));
+    await new Promise(resolve => setTimeout(resolve, 30));
     const messages = [];
     const originalBridge = window.mdViewerNative;
     window.mdViewerNative = { postMessage: value => messages.push(JSON.parse(value)) };

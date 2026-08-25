@@ -247,5 +247,17 @@
   "Opening printer dialog…": "프린터 대화상자를 여는 중…",
   "Printer dialog opened": "프린터 대화상자를 열었습니다",
   "Printing could not be started": "인쇄를 시작할 수 없습니다",
-  "Unavailable": "사용할 수 없음"
+  "Unavailable": "사용할 수 없음",
+  "MDZ &Password...": "MDZ 암호(&P)...",
+  "MDZ password": "MDZ 암호",
+  "Password": "암호",
+  "Leave the password blank and save the MDZ again to remove encryption.": "암호를 제거하려면 입력란을 비우고 MDZ를 다시 저장하세요.",
+  "Enter MDZ password": "MDZ 암호 입력",
+  "Enter the password to open {name}.": "{name} 파일을 열려면 암호를 입력하세요.",
+  "The password is incorrect. Try again.": "암호가 올바르지 않습니다. 다시 입력하세요.",
+  "The MDZ is currently password protected.": "현재 MDZ에 암호가 설정되어 있습니다.",
+  "The MDZ currently has no password.": "현재 MDZ에 암호가 설정되어 있지 않습니다.",
+  "Enter a password.": "암호를 입력하세요.",
+  "The MDZ password will be applied when you save.": "저장하면 MDZ 암호가 적용됩니다.",
+  "The MDZ password will be removed when you save.": "저장하면 MDZ 암호가 제거됩니다."
 }

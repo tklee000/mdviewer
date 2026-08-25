@@ -30,7 +30,9 @@ add_library(mdviewer_portable_core STATIC
     "${MDVIEWER_ROOT}/platform/common/PortableCore.cpp"
     "${MDVIEWER_ROOT}/src/Json.cpp"
     "${MDVIEWER_ROOT}/src/MdzArchive.cpp"
+    "${MDVIEWER_ROOT}/src/libmzip/aes256_aesni.cpp"
     "${MDVIEWER_ROOT}/src/libmzip/crc32.cpp"
+    "${MDVIEWER_ROOT}/src/libmzip/crypto.cpp"
     "${MDVIEWER_ROOT}/src/libmzip/deflate_decoder.cpp"
     "${MDVIEWER_ROOT}/src/libmzip/deflate_encoder.cpp"
     "${MDVIEWER_ROOT}/src/libmzip/match_avx2.cpp"
@@ -39,6 +41,9 @@ add_library(mdviewer_portable_core STATIC
     "${MDVIEWER_ROOT}/src/libmzip/platform.cpp"
     "${MDVIEWER_ROOT}/src/libmzip/thread_pool.cpp"
 )
+set_source_files_properties(
+    "${MDVIEWER_ROOT}/src/libmzip/aes256_aesni.cpp"
+    PROPERTIES COMPILE_OPTIONS "-maes")
 target_include_directories(mdviewer_portable_core PUBLIC
     "${MDVIEWER_ROOT}/platform/common"
     "${MDVIEWER_ROOT}/src"

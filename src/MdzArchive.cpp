@@ -2,8 +2,10 @@
 
 #include "Json.h"
 #include "libmzip/crc32.h"
+#include "libmzip/crypto.h"
 #include "libmzip/deflate_decoder.h"
 #include "libmzip/mzip_codec.h"
+#include "libmzip/platform.h"
 
 #include <algorithm>
 #include <array>
@@ -14,6 +16,7 @@
 #include <ctime>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -27,11 +30,28 @@ constexpr std::uint16_t kUtf8Flag = 1u << 11;
 constexpr std::uint16_t kEncryptedFlag = 1u;
 constexpr std::uint16_t kStoreMethod = 0;
 constexpr std::uint16_t kDeflateMethod = 8;
+constexpr std::uint16_t kWinZipAesMethod = 99;
+constexpr std::uint16_t kWinZipAesExtraId = 0x9901;
+constexpr std::uint16_t kWinZipAesVersion = 2;
+constexpr std::uint8_t kWinZipAes256Strength = 3;
+constexpr std::uint16_t kWinZipAesRequiredVersion = 51;
 constexpr std::size_t kMaximumArchiveBytes = 512ull * 1024 * 1024;
 constexpr std::size_t kMaximumEntryBytes = 128ull * 1024 * 1024;
 constexpr std::size_t kMaximumTotalBytes = 512ull * 1024 * 1024;
 constexpr std::size_t kMaximumEntries = 4096;
 constexpr std::size_t kMaximumPathBytes = 1024;
+
+class PasswordRequiredError final : public std::runtime_error {
+public:
+    PasswordRequiredError()
+        : std::runtime_error("The MDZ file is password protected") {}
+};
+
+class IncorrectPasswordError final : public std::runtime_error {
+public:
+    IncorrectPasswordError()
+        : std::runtime_error("The MDZ password is incorrect") {}
+};
 
 std::uint16_t Read16(std::string_view bytes, std::size_t offset) {
     if (offset > bytes.size() || bytes.size() - offset < 2) {
@@ -62,6 +82,49 @@ void Append32(std::string* bytes, std::uint32_t value) {
     bytes->push_back(static_cast<char>((value >> 8) & 0xFF));
     bytes->push_back(static_cast<char>((value >> 16) & 0xFF));
     bytes->push_back(static_cast<char>((value >> 24) & 0xFF));
+}
+
+void AppendWinZipAesExtra(std::string* bytes, std::uint16_t actualMethod) {
+    Append16(bytes, kWinZipAesExtraId);
+    Append16(bytes, 7);
+    Append16(bytes, kWinZipAesVersion);
+    bytes->append("AE", 2);
+    bytes->push_back(static_cast<char>(kWinZipAes256Strength));
+    Append16(bytes, actualMethod);
+}
+
+struct WinZipAesExtra {
+    std::uint16_t version = 0;
+    std::uint8_t strength = 0;
+    std::uint16_t actualMethod = 0;
+};
+
+std::optional<WinZipAesExtra> ParseWinZipAesExtra(std::string_view extra) {
+    std::size_t cursor = 0;
+    while (cursor + 4 <= extra.size()) {
+        const std::uint16_t id = Read16(extra, cursor);
+        const std::uint16_t length = Read16(extra, cursor + 2);
+        cursor += 4;
+        if (length > extra.size() - cursor) {
+            throw std::runtime_error("Invalid ZIP extra field");
+        }
+        if (id == kWinZipAesExtraId) {
+            if (length < 7 || extra[cursor + 2] != 'A' ||
+                extra[cursor + 3] != 'E') {
+                throw std::runtime_error("Invalid WinZip AES extra field");
+            }
+            return WinZipAesExtra{
+                Read16(extra, cursor),
+                static_cast<std::uint8_t>(extra[cursor + 4]),
+                Read16(extra, cursor + 5),
+            };
+        }
+        cursor += length;
+    }
+    if (cursor != extra.size()) {
+        throw std::runtime_error("Invalid ZIP extra field bounds");
+    }
+    return std::nullopt;
 }
 
 std::wstring WideError(const std::exception& error) {
@@ -162,6 +225,7 @@ struct CentralRecord {
     std::uint32_t compressedSize = 0;
     std::uint32_t expandedSize = 0;
     std::uint32_t offset = 0;
+    bool encrypted = false;
 };
 
 struct CodecBuffer {
@@ -244,8 +308,10 @@ Package CreateDocument(const std::string& markdown, const std::string& title) {
 }
 
 bool ReadBytes(const std::string& bytes, Package* package,
-               std::wstring* errorMessage) {
+               std::wstring* errorMessage, const std::string& password,
+               ReadStatus* status) {
     if (!package) return false;
+    if (status) *status = ReadStatus::Error;
     try {
         if (bytes.size() > kMaximumArchiveBytes) {
             throw std::runtime_error("MDZ archive exceeds the 512 MB safety limit");
@@ -294,18 +360,34 @@ bool ReadBytes(const std::string& bytes, Package* package,
                 throw std::runtime_error("Invalid ZIP central entry bounds");
             }
             const std::string name(view.substr(cursor + 46, nameLength));
+            const std::string_view centralExtra = view.substr(
+                cursor + 46 + nameLength, extraLength);
+            const auto aes = ParseWinZipAesExtra(centralExtra);
             cursor += recordLength;
 
             const bool directory = !name.empty() && name.back() == '/';
             if (!IsSafeArchivePath(name, directory)) {
                 throw std::runtime_error("MDZ contains an unsafe archive path");
             }
-            if ((flags & kEncryptedFlag) != 0) {
-                throw std::runtime_error("Encrypted MDZ entries are not supported");
+            const bool encrypted = (flags & kEncryptedFlag) != 0;
+            if (encrypted && (!aes || method != kWinZipAesMethod)) {
+                throw std::runtime_error(
+                    "Traditional ZIP encryption is not supported in MDZ files");
             }
-            if (method != kStoreMethod && method != kDeflateMethod) {
+            if (!encrypted && (aes || method == kWinZipAesMethod)) {
+                throw std::runtime_error("Invalid WinZip AES entry flags");
+            }
+            if (aes && (aes->strength != kWinZipAes256Strength ||
+                        (aes->version != 1 &&
+                         aes->version != kWinZipAesVersion))) {
+                throw std::runtime_error(
+                    "Only WinZip AES-256 AE-1/AE-2 MDZ entries are supported");
+            }
+            const std::uint16_t actualMethod = aes ? aes->actualMethod : method;
+            if (actualMethod != kStoreMethod && actualMethod != kDeflateMethod) {
                 throw std::runtime_error("MDZ contains an unsupported ZIP compression method");
             }
+            if (encrypted && password.empty()) throw PasswordRequiredError();
             if (expandedSize > kMaximumEntryBytes ||
                 totalExpanded > kMaximumTotalBytes - expandedSize) {
                 throw std::runtime_error("MDZ expanded data exceeds the safety limit");
@@ -329,27 +411,56 @@ bool ReadBytes(const std::string& bytes, Package* package,
             if (localName != name) {
                 throw std::runtime_error("ZIP local and central names differ");
             }
+            if (Read16(view, localOffset + 6) != flags ||
+                Read16(view, localOffset + 8) != method) {
+                throw std::runtime_error("ZIP local and central entry fields differ");
+            }
+            const auto localAes = ParseWinZipAesExtra(view.substr(
+                localOffset + 30 + localNameLength, localExtraLength));
+            if (static_cast<bool>(localAes) != static_cast<bool>(aes) ||
+                (aes && (localAes->version != aes->version ||
+                         localAes->strength != aes->strength ||
+                         localAes->actualMethod != aes->actualMethod))) {
+                throw std::runtime_error("ZIP local and central AES fields differ");
+            }
             if (directory) continue;
             if (!loaded.entries.emplace(name, Bytes{}).second) {
                 throw std::runtime_error("MDZ contains duplicate entry paths");
             }
             Bytes& expanded = loaded.entries.at(name);
             expanded.resize(expandedSize);
-            const auto* compressed = reinterpret_cast<const std::uint8_t*>(
+            const auto* payload = reinterpret_cast<const std::uint8_t*>(
                 bytes.data() + dataOffset);
-            if (method == kStoreMethod) {
-                if (compressedSize != expandedSize) {
+            Bytes decrypted;
+            const std::uint8_t* compressed = payload;
+            std::size_t actualCompressedSize = compressedSize;
+            if (encrypted) {
+                if (compressedSize < 28) {
+                    throw std::runtime_error("Invalid WinZip AES payload size");
+                }
+                try {
+                    decrypted = fz::winzip_aes256_decrypt(
+                        payload, compressedSize, password, fz::cpu_has_aesni());
+                } catch (const std::exception&) {
+                    throw IncorrectPasswordError();
+                }
+                compressed = decrypted.data();
+                actualCompressedSize = decrypted.size();
+            }
+            if (actualMethod == kStoreMethod) {
+                if (actualCompressedSize != expandedSize) {
                     throw std::runtime_error("Invalid stored ZIP entry size");
                 }
                 if (expandedSize) std::memcpy(expanded.data(), compressed, expandedSize);
             } else {
                 const fz::InflateResult result = fz::inflate_raw_to_buffer(
-                    compressed, compressedSize, expandedSize, expanded.data());
+                    compressed, actualCompressedSize, expandedSize, expanded.data());
                 if (result.size != expandedSize) {
                     throw std::runtime_error("DEFLATE output size mismatch");
                 }
             }
-            if (fz::Crc32::compute(expanded.data(), expanded.size()) != crc) {
+            if ((!aes || aes->version == 1) &&
+                fz::Crc32::compute(expanded.data(), expanded.size()) != crc) {
                 throw std::runtime_error("ZIP entry CRC32 mismatch");
             }
             if (IsMarkdownPath(name) &&
@@ -362,7 +473,16 @@ bool ReadBytes(const std::string& bytes, Package* package,
         }
         loaded.entryPoint = ResolveEntryPoint(loaded.entries);
         *package = std::move(loaded);
+        if (status) *status = ReadStatus::Success;
         return true;
+    } catch (const PasswordRequiredError& error) {
+        if (status) *status = ReadStatus::PasswordRequired;
+        if (errorMessage) *errorMessage = WideError(error);
+        return false;
+    } catch (const IncorrectPasswordError& error) {
+        if (status) *status = ReadStatus::IncorrectPassword;
+        if (errorMessage) *errorMessage = WideError(error);
+        return false;
     } catch (const std::exception& error) {
         if (errorMessage) *errorMessage = WideError(error);
         return false;
@@ -370,7 +490,7 @@ bool ReadBytes(const std::string& bytes, Package* package,
 }
 
 bool BuildBytes(const Package& package, std::string* bytes,
-                std::wstring* errorMessage) {
+                std::wstring* errorMessage, const std::string& password) {
     if (!bytes) return false;
     try {
         if (package.entries.empty() || package.entries.size() > kMaximumEntries ||
@@ -407,31 +527,41 @@ bool BuildBytes(const Package& package, std::string* bytes,
             }
             CentralRecord record;
             record.name = name;
-            record.crc = fz::Crc32::compute(data.data(), data.size());
+            record.encrypted = !password.empty();
+            record.crc = record.encrypted
+                ? 0u : fz::Crc32::compute(data.data(), data.size());
             const mdz::Bytes compressed = Deflate(data);
-            if (compressed.size() > 0xFFFFFFFFu) {
+            const mdz::Bytes payload = record.encrypted
+                ? fz::winzip_aes256_encrypt(
+                    compressed.data(), compressed.size(), password,
+                    fz::cpu_has_aesni())
+                : compressed;
+            if (payload.size() > 0xFFFFFFFFu) {
                 throw std::runtime_error("Compressed MDZ entry requires ZIP64");
             }
-            record.compressedSize = static_cast<std::uint32_t>(compressed.size());
+            record.compressedSize = static_cast<std::uint32_t>(payload.size());
             record.expandedSize = static_cast<std::uint32_t>(data.size());
             record.offset = static_cast<std::uint32_t>(result.size());
             central.push_back(record);
 
             Append32(&result, kLocalHeaderSignature);
-            Append16(&result, 20);
-            Append16(&result, kUtf8Flag);
-            Append16(&result, kDeflateMethod);
+            Append16(&result, record.encrypted ? kWinZipAesRequiredVersion : 20);
+            Append16(&result, static_cast<std::uint16_t>(
+                kUtf8Flag | (record.encrypted ? kEncryptedFlag : 0)));
+            Append16(&result, record.encrypted
+                ? kWinZipAesMethod : kDeflateMethod);
             Append16(&result, dosTime);
             Append16(&result, dosDate);
             Append32(&result, record.crc);
             Append32(&result, record.compressedSize);
             Append32(&result, record.expandedSize);
             Append16(&result, static_cast<std::uint16_t>(name.size()));
-            Append16(&result, 0);
+            Append16(&result, record.encrypted ? 11 : 0);
             result.append(name);
-            if (!compressed.empty()) {
-                result.append(reinterpret_cast<const char*>(compressed.data()),
-                              compressed.size());
+            if (record.encrypted) AppendWinZipAesExtra(&result, kDeflateMethod);
+            if (!payload.empty()) {
+                result.append(reinterpret_cast<const char*>(payload.data()),
+                              payload.size());
             }
         }
 
@@ -441,23 +571,26 @@ bool BuildBytes(const Package& package, std::string* bytes,
         const std::uint32_t centralOffset = static_cast<std::uint32_t>(result.size());
         for (const CentralRecord& record : central) {
             Append32(&result, kCentralHeaderSignature);
-            Append16(&result, 20);
-            Append16(&result, 20);
-            Append16(&result, kUtf8Flag);
-            Append16(&result, kDeflateMethod);
+            Append16(&result, record.encrypted ? kWinZipAesRequiredVersion : 20);
+            Append16(&result, record.encrypted ? kWinZipAesRequiredVersion : 20);
+            Append16(&result, static_cast<std::uint16_t>(
+                kUtf8Flag | (record.encrypted ? kEncryptedFlag : 0)));
+            Append16(&result, record.encrypted
+                ? kWinZipAesMethod : kDeflateMethod);
             Append16(&result, dosTime);
             Append16(&result, dosDate);
             Append32(&result, record.crc);
             Append32(&result, record.compressedSize);
             Append32(&result, record.expandedSize);
             Append16(&result, static_cast<std::uint16_t>(record.name.size()));
-            Append16(&result, 0);
+            Append16(&result, record.encrypted ? 11 : 0);
             Append16(&result, 0);
             Append16(&result, 0);
             Append16(&result, 0);
             Append32(&result, 0);
             Append32(&result, record.offset);
             result.append(record.name);
+            if (record.encrypted) AppendWinZipAesExtra(&result, kDeflateMethod);
         }
         if (result.size() > 0xFFFFFFFFu) {
             throw std::runtime_error("MDZ archive requires ZIP64");

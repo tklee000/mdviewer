@@ -10,6 +10,7 @@
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_menu_model.h"
+#include "include/cef_permission_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_resource_handler.h"
@@ -38,7 +39,8 @@ constexpr char kNativeMessageName[] = "MdViewer.NativeMessage";
 constexpr char kHostMessageName[] = "MdViewer.HostMessage";
 
 bool IsApplicationUrl(const std::string& url) {
-    return url.compare(0, sizeof(kUiOrigin) - 1, kUiOrigin) == 0;
+    return url == "https://app.mdviewer" ||
+           url.compare(0, sizeof(kUiOrigin) - 1, kUiOrigin) == 0;
 }
 
 bool IsPdfViewerUrl(const std::string& url) {
@@ -154,6 +156,7 @@ class BrowserClient final : public CefClient,
                             public CefContextMenuHandler,
                             public CefDragHandler,
                             public CefKeyboardHandler,
+                            public CefPermissionHandler,
                             public CefRequestHandler {
 public:
     explicit BrowserClient(BrowserHostDelegate* delegate) : delegate_(delegate) {}
@@ -163,6 +166,7 @@ public:
     CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
     CefRefPtr<CefDragHandler> GetDragHandler() override { return this; }
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+    CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
@@ -224,6 +228,20 @@ public:
                              CefRefPtr<CefContextMenuParams> params,
                              CefRefPtr<CefMenuModel> model) override {
         if (model) model->Clear();
+    }
+
+    bool OnShowPermissionPrompt(
+        CefRefPtr<CefBrowser> browser,
+        uint64_t promptId,
+        const CefString& requestingOrigin,
+        uint32_t requestedPermissions,
+        CefRefPtr<CefPermissionPromptCallback> callback) override {
+        if (!callback || !IsApplicationUrl(requestingOrigin.ToString()) ||
+            requestedPermissions != CEF_PERMISSION_TYPE_CLIPBOARD) {
+            return false;
+        }
+        callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+        return true;
     }
 
     bool OnDragEnter(CefRefPtr<CefBrowser> browser,

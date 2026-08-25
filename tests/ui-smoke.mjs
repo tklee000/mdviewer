@@ -141,6 +141,21 @@ async function click(selector) {
   })()`);
 }
 
+async function trustedClick(selector) {
+  const point = await evaluate(`(() => {
+    const bounds = document.querySelector(${js(selector)}).getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  })()`);
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed", button: "left", buttons: 1,
+    clickCount: 1, x: point.x, y: point.y
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", button: "left", buttons: 0,
+    clickCount: 1, x: point.x, y: point.y
+  });
+}
+
 async function verifySourceCommand(before, selector, after, start = 0, end = before.length) {
   await setSource(before, start, end);
   await click(selector);
@@ -183,6 +198,10 @@ async function verifyPreviewCommand(markdown, targetSelector, commandSelector, r
 try {
   await connect();
   await send("Runtime.enable");
+  await send("Browser.grantPermissions", {
+    origin: `http://127.0.0.1:${port}`,
+    permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"]
+  });
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (await evaluate("Boolean(document.querySelector('#table-size-grid button'))")) break;
     await delay(50);
@@ -199,6 +218,141 @@ try {
     previewVisible: true, sourceHidden: true, currentMode: "preview",
     toolbarModeSwitchRemoved: true, toggleIsFirstStatusItem: true
   }, "preview is the default and mode switching lives at bottom left");
+
+  await setSource("alpha beta", 0, 5);
+  const sourceContextMenu = await evaluate(`(() => {
+    const editor = document.querySelector('#source-editor');
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true,
+      clientX: innerWidth - 1, clientY: innerHeight - 1
+    });
+    editor.dispatchEvent(event);
+    const menu = document.querySelector('#editor-context-menu');
+    const bounds = menu.getBoundingClientRect();
+    return {
+      prevented: event.defaultPrevented,
+      visible: !menu.hidden,
+      editor: menu.dataset.editor,
+      commands: [...menu.querySelectorAll('[data-editor-context-command]')]
+        .map((item) => item.dataset.editorContextCommand),
+      cutDisabled: menu.querySelector('[data-editor-context-command="cut"]').disabled,
+      copyDisabled: menu.querySelector('[data-editor-context-command="copy"]').disabled,
+      pasteDisabled: menu.querySelector('[data-editor-context-command="paste"]').disabled,
+      selection: [editor.selectionStart, editor.selectionEnd],
+      fitsViewport: bounds.left >= 0 && bounds.top >= 0 &&
+        bounds.right <= innerWidth && bounds.bottom <= innerHeight
+    };
+  })()`);
+  assert.deepEqual(sourceContextMenu, {
+    prevented: true,
+    visible: true,
+    editor: "source",
+    commands: ["cut", "copy", "paste"],
+    cutDisabled: false,
+    copyDisabled: false,
+    pasteDisabled: false,
+    selection: [0, 5],
+    fitsViewport: true
+  }, "source right-click menu preserves selection and fits inside the viewport");
+  await trustedClick('#editor-context-menu [data-editor-context-command="copy"]');
+  assert.equal(await evaluate("navigator.clipboard.readText()"), "alpha",
+    "source context menu copies selected text");
+
+  await setSource("alpha beta", 0, 5);
+  await evaluate(`document.querySelector('#source-editor').dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 40, clientY: 80
+  }))`);
+  await trustedClick('#editor-context-menu [data-editor-context-command="cut"]');
+  assert.equal(await sourceValue(), " beta", "source context menu cuts selected text");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await sourceValue(), "alpha beta", "source context menu cut participates in undo");
+
+  await evaluate("navigator.clipboard.writeText('gamma')");
+  await setSource("alpha beta", 6, 10);
+  await evaluate(`document.querySelector('#source-editor').dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 40, clientY: 80
+  }))`);
+  await trustedClick('#editor-context-menu [data-editor-context-command="paste"]');
+  for (let attempt = 0; attempt < 50 && await sourceValue() !== "alpha gamma"; attempt += 1) {
+    await delay(10);
+  }
+  assert.equal(await sourceValue(), "alpha gamma", "source context menu pastes clipboard text");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await sourceValue(), "alpha beta", "source context menu paste participates in undo");
+
+  await evaluate(`(() => {
+    const editor = document.querySelector('#source-editor');
+    editor.setSelectionRange(3, 3);
+    editor.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 40, clientY: 80
+    }));
+  })()`);
+  assert.deepEqual(await evaluate(`(() => {
+    const menu = document.querySelector('#editor-context-menu');
+    return [
+      menu.querySelector('[data-editor-context-command="cut"]').disabled,
+      menu.querySelector('[data-editor-context-command="copy"]').disabled,
+      menu.querySelector('[data-editor-context-command="paste"]').disabled
+    ];
+  })()`), [true, true, false], "cut and copy are disabled without a selection");
+  await evaluate("document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))");
+  assert.equal(await evaluate("document.querySelector('#editor-context-menu').hidden"), true,
+    "clicking outside closes the editor context menu");
+
+  await setPreviewSelection("alpha beta", "#preview-editor p");
+  const previewContextMenu = await evaluate(`(() => {
+    const editor = document.querySelector('#preview-editor');
+    editor.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 60, clientY: 100
+    }));
+    const menu = document.querySelector('#editor-context-menu');
+    return {
+      visible: !menu.hidden,
+      editor: menu.dataset.editor,
+      cutDisabled: menu.querySelector('[data-editor-context-command="cut"]').disabled,
+      copyDisabled: menu.querySelector('[data-editor-context-command="copy"]').disabled
+    };
+  })()`);
+  assert.deepEqual(previewContextMenu, {
+    visible: true, editor: "preview", cutDisabled: false, copyDisabled: false
+  }, "preview right-click menu recognizes the rendered selection");
+  await trustedClick('#editor-context-menu [data-editor-context-command="copy"]');
+  assert.equal(await evaluate("navigator.clipboard.readText()"), "alpha beta",
+    "preview context menu copies selected rendered text");
+
+  await setPreviewSelection("alpha beta", "#preview-editor p");
+  await evaluate(`document.querySelector('#preview-editor').dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 60, clientY: 100
+  }))`);
+  await trustedClick('#editor-context-menu [data-editor-context-command="cut"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor').textContent.trim()"), "",
+    "preview context menu cuts selected rendered text");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor').textContent.trim()"), "alpha beta",
+    "preview context menu cut participates in undo");
+
+  await evaluate(`(async () => {
+    await navigator.clipboard.writeText('gamma');
+    const text = document.querySelector('#preview-editor p').firstChild;
+    const range = document.createRange();
+    range.setStart(text, 6); range.setEnd(text, 10);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    text.parentElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    document.querySelector('#preview-editor').dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 60, clientY: 100
+    }));
+  })()`);
+  await trustedClick('#editor-context-menu [data-editor-context-command="paste"]');
+  for (let attempt = 0; attempt < 50 &&
+      await evaluate("document.querySelector('#preview-editor').textContent.trim()") !== "alpha gamma";
+      attempt += 1) {
+    await delay(10);
+  }
+  assert.equal(await evaluate("document.querySelector('#preview-editor').textContent.trim()"), "alpha gamma",
+    "preview context menu pastes clipboard text");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor').textContent.trim()"), "alpha beta",
+    "preview context menu paste participates in undo");
   const japaneseUiFonts = await evaluate(`(async () => {
     await window.MdViewerI18n.setLocale('ja-JP');
     const font = (selector) => getComputedStyle(document.querySelector(selector)).fontFamily;

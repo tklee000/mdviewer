@@ -644,6 +644,14 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   z-index: 40;
 }
 .menu-popup[hidden] { display: none; }
+.editor-context-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  min-width: 190px;
+  border-radius: 8px;
+  z-index: 1200;
+}
 .menu-popup button {
   position: relative;
   display: block;
@@ -656,6 +664,11 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   white-space: pre;
 }
 .menu-popup button:hover, .menu-popup button:focus-visible { background: var(--accent-soft); }
+.menu-popup button:disabled {
+  color: var(--muted);
+  background: transparent;
+  cursor: default;
+}
 .menu-popup .provider-menu-item,
 .menu-popup .recent-document-item {
   display: flex;

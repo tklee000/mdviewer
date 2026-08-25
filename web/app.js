@@ -75,6 +75,7 @@
   let synchronizingSplitScroll = false;
   let pendingImageSourceSelection = null;
   let pendingImageFileName = "";
+  let editorContext = null;
   let recentDocumentItems = [];
   let toastHideTimer = 0;
   let toastRemoveTimer = 0;
@@ -2846,6 +2847,163 @@
     $$('[data-toolbar-picker] > .menu-popup').forEach((popup) => { popup.hidden = true; });
     $("#status-mode-menu").hidden = true;
     $("#mode-toggle-button").setAttribute("aria-expanded", "false");
+    $("#editor-context-menu").hidden = true;
+  }
+
+  function restoreEditorContextSelection(context = editorContext) {
+    if (!context) return;
+    setActiveEditor(context.mode);
+    if (context.mode === "source") {
+      sourceEditor.focus({ preventScroll: true });
+      sourceEditor.setSelectionRange(
+        context.start, context.end, context.direction);
+      return;
+    }
+    previewSelectionRange = context.range?.cloneRange() || null;
+    restorePreviewSelection();
+  }
+
+  function cloneEditorContext() {
+    if (!editorContext) return null;
+    return editorContext.mode === "source"
+      ? { ...editorContext }
+      : { ...editorContext, range: editorContext.range?.cloneRange() || null };
+  }
+
+  function openEditorContextMenu(event, mode) {
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveEditor(mode);
+
+    if (mode === "source") {
+      editorContext = {
+        mode,
+        start: sourceEditor.selectionStart,
+        end: sourceEditor.selectionEnd,
+        direction: sourceEditor.selectionDirection || "none"
+      };
+    } else {
+      const selection = window.getSelection();
+      const selectedRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      if (selectedRange && previewEditor.contains(selectedRange.commonAncestorContainer)) {
+        previewSelectionRange = selectedRange.cloneRange();
+      } else if (previewSelectionRange &&
+                 (!previewEditor.contains(previewSelectionRange.startContainer) ||
+                  !previewEditor.contains(previewSelectionRange.endContainer))) {
+        previewSelectionRange = null;
+      }
+      editorContext = {
+        mode,
+        range: previewSelectionRange?.cloneRange() || null
+      };
+    }
+
+    const hasSelection = mode === "source"
+      ? editorContext.start !== editorContext.end
+      : Boolean(editorContext.range && !editorContext.range.collapsed);
+    const menu = $("#editor-context-menu");
+    $$('[data-editor-context-command="cut"], [data-editor-context-command="copy"]')
+      .forEach((button) => { button.disabled = !hasSelection; });
+
+    closeMenus();
+    menu.dataset.editor = mode;
+    menu.style.left = `${Math.max(4, event.clientX)}px`;
+    menu.style.top = `${Math.max(4, event.clientY)}px`;
+    menu.hidden = false;
+
+    const bounds = menu.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    menu.style.left = `${Math.max(4, Math.min(event.clientX, viewportWidth - bounds.width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(event.clientY, viewportHeight - bounds.height - 4))}px`;
+    menu.focus({ preventScroll: true });
+  }
+
+  async function executeEditorContextCommand(command) {
+    if (!editorContext || !["cut", "copy", "paste"].includes(command)) return;
+    const context = cloneEditorContext();
+    const selectedText = context.mode === "source"
+      ? sourceEditor.value.slice(context.start, context.end)
+      : context.range?.toString() || "";
+    restoreEditorContextSelection(context);
+    if (command === "copy") {
+      const copied = document.execCommand(command, false);
+      closeMenus();
+      if (!copied && selectedText) {
+        try {
+          await navigator.clipboard.writeText(selectedText);
+        } catch (error) {
+          console.error("Clipboard copy failed", error);
+        }
+      }
+      return;
+    }
+
+    let executed = false;
+    let changed = false;
+    if (context.mode === "source") {
+      const before = sourceEditor.value;
+      const historyRecorded = rememberSourceFormatting();
+      executed = document.execCommand(command, false);
+      applyingSourceFormatting = false;
+      changed = sourceEditor.value !== before;
+      if (!changed && historyRecorded) documentUndoHistory.pop();
+    } else {
+      changed = runPreviewFormatting(() => {
+        executed = document.execCommand(command, false);
+      });
+    }
+    closeMenus();
+    if (command === "cut") {
+      if (changed) return;
+      try {
+        await navigator.clipboard.writeText(selectedText);
+        restoreEditorContextSelection(context);
+        if (context.mode === "source") {
+          replaceSourceRange(context.start, context.end, "", context.start, context.start);
+        } else {
+          runPreviewFormatting(() => {
+            const selection = window.getSelection();
+            const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+            if (!range) return;
+            range.deleteContents();
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          });
+        }
+      } catch (error) {
+        console.error("Clipboard cut failed", error);
+      }
+      return;
+    }
+    if (executed || changed) return;
+
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      restoreEditorContextSelection(context);
+      if (context.mode === "source") {
+        const caret = context.start + text.length;
+        replaceSourceRange(context.start, context.end, text, caret, caret);
+      } else {
+        runPreviewFormatting(() => {
+          if (document.execCommand("insertText", false, text)) return;
+          const selection = window.getSelection();
+          const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+          if (!range) return;
+          range.deleteContents();
+          const inserted = document.createTextNode(text);
+          range.insertNode(inserted);
+          range.setStartAfter(inserted);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        });
+      }
+    } catch (error) {
+      console.error("Clipboard paste failed", error);
+    }
   }
 
   function toggleStatusModeMenu() {
@@ -3048,8 +3206,10 @@
       editorStage.classList.remove("is-file-drag-over");
       post("files.dropped");
     });
-    window.addEventListener("blur", () =>
-      editorStage.classList.remove("is-file-drag-over"));
+    window.addEventListener("blur", () => {
+      editorStage.classList.remove("is-file-drag-over");
+      closeMenus();
+    });
 
     $("#mode-toggle-button").addEventListener("click", toggleStatusModeMenu);
     $("#status-mode-menu").addEventListener("click", (event) => {
@@ -3413,9 +3573,36 @@
       closeMenus();
     });
     document.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest(".main-menu, [data-toolbar-picker], #mode-toggle-button, #status-mode-menu")) {
+      if (!event.target.closest(".main-menu, [data-toolbar-picker], #mode-toggle-button, #status-mode-menu, #editor-context-menu")) {
         closeMenus();
       }
+    });
+
+    $("#source-pane").addEventListener("contextmenu", (event) =>
+      openEditorContextMenu(event, "source"));
+    $("#preview-pane").addEventListener("contextmenu", (event) =>
+      openEditorContextMenu(event, "preview"));
+    $("#editor-context-menu").addEventListener("click", (event) => {
+      const item = event.target.closest("[data-editor-context-command]");
+      if (!item || item.disabled) return;
+      executeEditorContextCommand(item.dataset.editorContextCommand);
+    });
+    $("#editor-context-menu").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMenus();
+        restoreEditorContextSelection();
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const items = $$(`#editor-context-menu [data-editor-context-command]:not(:disabled)`);
+      if (!items.length) return;
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+        : event.key === "ArrowDown" ? (current + 1) % items.length
+          : (current - 1 + items.length) % items.length;
+      items[next].focus({ preventScroll: true });
     });
 
     $$("[data-window-command]").forEach((button) =>
@@ -3758,6 +3945,7 @@
       updateHwpxSummary();
     });
     window.addEventListener("resize", () => {
+      closeMenus();
       if (state.mode === "split" && innerWidth < splitMinimumWidth) setMode(activeEditorMode());
       else updateChrome();
     });

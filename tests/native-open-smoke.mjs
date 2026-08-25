@@ -162,14 +162,29 @@ function send(method, params = {}) {
   });
 }
 
-async function evaluate(expression) {
+async function evaluate(expression, userGesture = false) {
   const result = await send("Runtime.evaluate", {
-    expression, awaitPromise: true, returnByValue: true
+    expression, awaitPromise: true, returnByValue: true, userGesture
   });
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
   }
   return result.result.value;
+}
+
+async function trustedClick(selector) {
+  const point = await evaluate(`(() => {
+    const bounds = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  })()`);
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed", button: "left", buttons: 1,
+    clickCount: 1, x: point.x, y: point.y
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", button: "left", buttons: 0,
+    clickCount: 1, x: point.x, y: point.y
+  });
 }
 
 try {
@@ -199,6 +214,26 @@ try {
   await waitFor(() => evaluate(
     "document.querySelector('#document-name')?.textContent === 'roundtrip.md'"),
   "Initial Markdown document did not open.");
+
+  const initialSource = await evaluate("document.querySelector('#source-editor').value");
+  await evaluate(`(async () => {
+    document.querySelector('[data-status-mode="source"]').click();
+    const editor = document.querySelector('#source-editor');
+    editor.focus();
+    editor.setSelectionRange(0, 0);
+    await navigator.clipboard.writeText('native-context-paste');
+    editor.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 80, clientY: 120
+    }));
+  })()`, true);
+  await trustedClick('#editor-context-menu [data-editor-context-command="paste"]');
+  await waitFor(() => evaluate(
+    "document.querySelector('#source-editor').value.startsWith('native-context-paste')"),
+  "Native CEF clipboard permission did not allow context-menu paste.");
+  await evaluate("document.querySelector('[data-editor-command=\"undo\"]').click()");
+  await waitFor(() => evaluate(
+    `document.querySelector('#source-editor').value === ${JSON.stringify(initialSource)}`),
+  "Undo did not restore the document after native context-menu paste.");
 
   assert.equal(sendOpen(app.pid, secondDocument), 1,
     "clean window should report that it reused the current window");

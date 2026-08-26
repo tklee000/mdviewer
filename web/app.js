@@ -1737,6 +1737,126 @@
     return output.join("\n");
   }
 
+  // Renumber ATX headings by outline level. H1 is the unnumbered document
+  // title; H2 starts at 1, H3 at 1.1, H4 at 1.1.1, and so on. Only a number
+  // at the beginning of a heading is replaced. H2 uses a dotted label by
+  // default ("1."), while deeper levels keep their own trailing punctuation.
+  function numberHeadingLines(markdown) {
+    const lines = String(markdown || "").replaceAll("\r\n", "\n").split("\n");
+    const counters = Array(6).fill(0);
+    let fenceMarker = "";
+    const frontmatterEnd = lines[0]?.trim() === "---"
+      ? lines.slice(1).findIndex((line) => line.trim() === "---") + 1 : -1;
+    let headingCount = 0;
+    let numberedHeadingCount = 0;
+    let changedCount = 0;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (index <= frontmatterEnd) continue;
+      if (fenceMarker) {
+        if (new RegExp(`^ {0,3}${fenceMarker}`).test(line)) fenceMarker = "";
+        continue;
+      }
+      const fence = line.match(/^ {0,3}(```|~~~)/);
+      if (fence) {
+        fenceMarker = fence[1];
+        continue;
+      }
+
+      const heading = line.match(/^([ \t]{0,3})(#{1,6})([ \t]+)(.*)$/);
+      if (!heading) continue;
+
+      headingCount += 1;
+      const indentation = heading[1];
+      const marker = heading[2];
+      const separator = heading[3];
+      const level = marker.length;
+      let body = heading[4];
+      let closingHashes = "";
+      const closing = body.match(/([ \t]+#+[ \t]*)$/);
+      if (closing) {
+        closingHashes = closing[1];
+        body = body.slice(0, -closingHashes.length);
+      }
+
+      const number = body.match(/^([ \t]*)(\d+(?:\.\d+)*)([.)]?)(?=$|[ \t]+)/);
+      const bodyLeading = number ? number[1] : body.match(/^[ \t]*/)?.[0] || "";
+      const content = number
+        ? body.slice(number[0].length).replace(/^[ \t]+/, "")
+        : body.slice(bodyLeading.length);
+      const punctuation = level === 2 ? "." : (number?.[3] || "");
+      let numberedBody;
+      if (level === 1) {
+        counters.fill(0);
+        // H1 is intentionally unnumbered, even when it had a stale prefix.
+        numberedBody = `${bodyLeading}${content}`;
+      } else {
+        numberedHeadingCount += 1;
+        // Fill skipped parent levels so a document beginning with H3 still
+        // receives a useful 1.1 rather than 0.1.
+        for (let parent = 1; parent < level - 1; parent += 1) {
+          if (!counters[parent]) counters[parent] = 1;
+        }
+        counters[level - 1] += 1;
+        for (let child = level; child < counters.length; child += 1) counters[child] = 0;
+        const label = counters.slice(1, level).join(".");
+        numberedBody = `${bodyLeading}${label}${punctuation}` +
+          (content ? ` ${content}` : "");
+      }
+      const replacement = `${indentation}${marker}${separator}${numberedBody}${closingHashes}`;
+      if (replacement !== line) {
+        lines[index] = replacement;
+        changedCount += 1;
+      }
+    }
+
+    return {
+      text: lines.join("\n"),
+      headingCount,
+      numberedHeadingCount,
+      changedCount
+    };
+  }
+
+  function autoNumberHeadings() {
+    if (activeEditorMode() === "preview" && state.previewChanged) {
+      normalizePreviewDom();
+      state.text = previewToMarkdown();
+      sourceEditor.value = state.text;
+      updateSourceHighlight();
+      state.previewChanged = false;
+    } else if (activeEditorMode() === "source") {
+      state.text = sourceEditor.value;
+    }
+
+    const result = numberHeadingLines(state.text);
+    if (!result.headingCount) {
+      showToast(i18n.t("No headings found"), "info");
+      return;
+    }
+    if (!result.changedCount) {
+      showToast(i18n.t("Headings are already numbered"), "info");
+      return;
+    }
+
+    const editorMode = activeEditorMode();
+    rememberDocumentHistory();
+    state.applying = true;
+    state.text = result.text;
+    sourceEditor.value = result.text;
+    updateSourceHighlight();
+    renderPreview();
+    state.applying = false;
+    state.previewChanged = false;
+    markChanged();
+    if (editorMode === "source") sourceEditor.focus();
+    else previewEditor.focus();
+    showToast(i18n.t("Headings numbered: {count}", {
+      count: result.numberedHeadingCount || result.headingCount
+    }), "success");
+  }
+
   function inlineToMarkdown(node) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
@@ -3139,6 +3259,8 @@
       openMdzPasswordSettings();
     } else if (name.startsWith("file.") || name.startsWith("app.")) {
       post("command", { name });
+    } else if (name === "edit.autoNumberHeadings") {
+      autoNumberHeadings();
     } else if (name.startsWith("edit.")) {
       editorCommand(name.slice(5));
     } else if (["view.source", "view.split", "view.preview"].includes(name)) {

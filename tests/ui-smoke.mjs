@@ -353,6 +353,30 @@ try {
   await click('[data-editor-command="undo"]');
   assert.equal(await evaluate("document.querySelector('#preview-editor').textContent.trim()"), "alpha beta",
     "preview context menu paste participates in undo");
+
+  await setPreviewSelection("```\nalpha\n```", "#preview-editor pre code");
+  const plainPreviewPaste = await evaluate(`(() => {
+    const editor = document.querySelector('#preview-editor');
+    const clipboard = new DataTransfer();
+    clipboard.setData('text/plain', 'beta');
+    clipboard.setData('text/html', '<code style="color: rgb(255, 0, 0)">beta</code>');
+    const event = new ClipboardEvent('paste', {
+      bubbles: true, cancelable: true, clipboardData: clipboard
+    });
+    editor.dispatchEvent(event);
+    return {
+      prevented: event.defaultPrevented,
+      text: editor.querySelector('pre code')?.textContent,
+      nestedCode: editor.querySelectorAll('pre code code').length,
+      styledElements: editor.querySelectorAll('pre code [style]').length
+    };
+  })()`);
+  assert.deepEqual(plainPreviewPaste, {
+    prevented: true, text: "beta", nestedCode: 0, styledElements: 0
+  }, "preview paste inserts text without clipboard HTML formatting");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor pre code').textContent"), "alpha",
+    "plain preview paste participates in undo");
   const japaneseUiFonts = await evaluate(`(async () => {
     await window.MdViewerI18n.setLocale('ja-JP');
     const font = (selector) => getComputedStyle(document.querySelector(selector)).fontFamily;
@@ -1144,6 +1168,7 @@ try {
   await verifySourceCommand("alpha", '[data-format="italic"]', "*alpha*");
   await verifySourceCommand("alpha", '[data-format="strike"]', "~~alpha~~");
   await verifySourceCommand("alpha", '[data-format="inlineCode"]', "`alpha`");
+  await verifySourceCommand("alpha", "#inline-code-button", "`alpha`");
   await verifySourceCommand("alpha", '[data-format="codeBlock"]', "```\nalpha\n```");
   await evaluate("window.prompt = () => 'https://example.com'");
   await verifySourceCommand("alpha", '[data-format="link"]', "[alpha](https://example.com)");
@@ -1160,6 +1185,17 @@ try {
     return Boolean(icon?.querySelector('rect') && icon?.querySelector('circle') &&
       icon?.querySelector('path'));
   })()`), true, "image toolbar button uses a recognizable picture icon");
+  assert.equal(await evaluate(`(() => {
+    const codeButton = document.querySelector('#inline-code-button');
+    return codeButton?.previousElementSibling?.dataset.blockFormat === 'blockquote' &&
+      Boolean(codeButton.querySelector('svg.toolbar-icon'));
+  })()`), true, "inline-code toolbar button is next to the block quote button");
+  await setSource("`sample`");
+  const sourceInlineCodeColor = await evaluate(
+    "getComputedStyle(document.querySelector('#source-highlight .source-syntax-code')).color");
+  await setEditorMode("preview");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('#preview-editor code')).color"),
+    sourceInlineCodeColor, "preview inline code uses the source view's yellow color");
 
   await setSource("");
   await click('[data-format="image"]');
@@ -1348,11 +1384,100 @@ try {
   await click('[data-editor-command="redo"]');
   assert.equal(await evaluate("Boolean(document.querySelector('#preview-editor strong, #preview-editor b'))"), true, "preview bold redo");
 
+  await setSource("first\n\nsecond\n\nthird");
+  await setEditorMode("preview");
+  await evaluate(`(() => {
+    const text = document.querySelectorAll('#preview-editor p')[1].firstChild;
+    const range = document.createRange(); range.setStart(text, 3); range.collapse(true);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.querySelector('#preview-editor').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    document.querySelector('#preview-editor').focus();
+  })()`);
+  await send("Input.insertText", { text: "!" });
+  assert.equal(await evaluate("document.querySelectorAll('#preview-editor p')[1].textContent"), "sec!ond",
+    "preview typing changes the second paragraph before undo");
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+  }))`);
+  assert.deepEqual(await evaluate(`(() => {
+    const range = getSelection().getRangeAt(0);
+    return {
+      text: document.querySelectorAll('#preview-editor p')[1].textContent,
+      node: range.startContainer.textContent,
+      offset: range.startOffset
+    };
+  })()`), { text: "second", node: "second", offset: 3 },
+  "preview undo restores the caret instead of moving it to the document start");
+
+  await setSource("# First heading\n\n### Third heading\n\n###### Sixth heading");
+  await setEditorMode("preview");
+  for (const level of [1, 3, 6]) {
+    await trustedClick(`#preview-editor h${level}`);
+    assert.equal(await evaluate("document.querySelector('#heading-button-label').textContent"),
+      `H${level}`, `preview heading ${level} click updates the toolbar heading label`);
+  }
+  assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('[data-heading-level]'),
+    (item) => item.textContent)`),
+    ["Paragraph", "H1", "H2", "H3", "H4", "H5", "H6"],
+    "heading menu uses compact H-level labels");
+
+  await setSource("첫 문단입니다.\n\n### 4.3 서버 개인키와 CSR 생성");
+  await setEditorMode("preview");
+  const normalH3Size = await evaluate("getComputedStyle(document.querySelector('#preview-editor h3')).fontSize");
+  await evaluate(`(() => {
+    const text = document.querySelector('#preview-editor p').firstChild;
+    const range = document.createRange();
+    range.setStart(text, text.length); range.collapse(true);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.querySelector('#preview-editor').focus();
+  })()`);
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown", windowsVirtualKeyCode: 46, nativeVirtualKeyCode: 46,
+    key: "Delete", code: "Delete"
+  });
+  await send("Input.dispatchKeyEvent", {
+    type: "keyUp", windowsVirtualKeyCode: 46, nativeVirtualKeyCode: 46,
+    key: "Delete", code: "Delete"
+  });
+  assert.equal(await evaluate(`Boolean(document.querySelector('#preview-editor span[style*="font-size"]'))`), false,
+    "preview Delete does not leave a browser-generated font size behind");
+  const previewAfterDelete = await evaluate(`(() => {
+    const paragraph = document.querySelector('#preview-editor p');
+    return {
+      childNodes: paragraph.childNodes.length,
+      childType: paragraph.firstChild?.nodeType,
+      text: paragraph.textContent
+    };
+  })()`);
+  assert.deepEqual(previewAfterDelete, {
+    childNodes: 1, childType: 3, text: "첫 문단입니다.4.3 서버 개인키와 CSR 생성"
+  }, "preview Delete produces the same text-node structure as a Markdown render");
+  await evaluate(`(() => {
+    const text = document.querySelector('#preview-editor p').firstChild;
+    const titleStart = text.length - '4.3 서버 개인키와 CSR 생성'.length;
+    const range = document.createRange(); range.setStart(text, titleStart); range.setEnd(text, text.length);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.querySelector('#preview-editor').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  })()`);
+  await click('[data-heading-level="3"]');
+  const reappliedPreviewHeading = await evaluate(`({
+    html: document.querySelector('#preview-editor').innerHTML,
+    headingSize: getComputedStyle(document.querySelector('#preview-editor h3')).fontSize,
+    styledTextSize: document.querySelector('#preview-editor h3 span')
+      ? getComputedStyle(document.querySelector('#preview-editor h3 span')).fontSize : null
+  })`);
+  assert.equal(reappliedPreviewHeading.styledTextSize, null,
+    `reapplied preview heading has no nested browser font size: ${reappliedPreviewHeading.html}`);
+  assert.equal(reappliedPreviewHeading.headingSize, normalH3Size,
+    "preview heading restored after Delete uses the normal H3 size");
+
   await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="italic"]',
     "Boolean(document.querySelector('#preview-editor em, #preview-editor i'))");
   await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="strike"]',
     "Boolean(document.querySelector('#preview-editor del, #preview-editor s, #preview-editor strike'))");
   await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="inlineCode"]',
+    "Boolean(document.querySelector('#preview-editor p code'))");
+  await verifyPreviewCommand("alpha", "#preview-editor p", "#inline-code-button",
     "Boolean(document.querySelector('#preview-editor p code'))");
   await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="codeBlock"]',
     "Boolean(document.querySelector('#preview-editor pre'))");

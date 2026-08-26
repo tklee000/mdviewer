@@ -235,11 +235,33 @@ try {
     `document.querySelector('#source-editor').value === ${JSON.stringify(initialSource)}`),
   "Undo did not restore the document after native context-menu paste.");
 
+  assert.equal(sendOpen(app.pid, secondDocument), 2,
+    "clean saved document should report that it launched a new window");
+  let observedCleanWindows = [];
+  const cleanNewWindow = await waitFor(() => {
+    observedCleanWindows = listWindows();
+    return observedCleanWindows.find((window) =>
+      !windowsBefore.has(window.processId) && window.processId !== app.pid &&
+      window.title.includes("README.md"));
+  }, () => `Clean saved document did not launch a new MdViewer process. ` +
+     `Observed windows: ${JSON.stringify(observedCleanWindows)}`);
+  testProcessIds.add(cleanNewWindow.processId);
+  assert.equal(await evaluate(
+    "document.querySelector('#document-name').textContent"), "roundtrip.md",
+  "clean saved document was replaced in the existing window");
+  closeWindow(cleanNewWindow.processId);
+
+  await evaluate(
+    "document.querySelector('[data-menu-command=\"file.new\"]').click()");
+  await waitFor(() => evaluate(
+    "document.querySelector('#source-editor').value === '' && " +
+    "document.querySelector('#dirty-indicator').hidden"),
+  "New command did not create an empty document.");
   assert.equal(sendOpen(app.pid, secondDocument), 1,
-    "clean window should report that it reused the current window");
+    "empty new document should report that it reused the current window");
   await waitFor(() => evaluate(
     "document.querySelector('#document-name')?.textContent === 'README.md'"),
-  "Clean window did not open the forwarded document.");
+  "Empty new document did not open the forwarded document.");
 
   await evaluate(`(() => {
     document.querySelector('[data-status-mode="source"]').click();

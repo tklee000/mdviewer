@@ -1148,7 +1148,12 @@ bool DesktopApp::OpenExternalDocuments(
     if (documents.empty()) return false;
 
     size_t firstNewWindow = 0;
-    if (!document_.dirty) {
+    const bool isEmptyNewDocument =
+        document_.origin == DocumentOrigin::Local &&
+        document_.format == DocumentFormat::Markdown &&
+        document_.path.empty() && document_.text.empty() &&
+        !document_.dirty && !googleDriveBusy_;
+    if (isEmptyNewDocument) {
         if (!OpenDocument(documents.front(), false)) return false;
         firstNewWindow = 1;
         if (activateCurrentWindow) {

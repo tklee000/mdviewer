@@ -22,9 +22,9 @@
   --danger: #ff6577;
   --code-bg: #161616;
   --code-text: #e8e8e8;
-  --inline-code: #ff8f78;
-  --inline-code-bg: rgba(255, 105, 74, .16);
-  --inline-code-border: rgba(255, 138, 88, .42);
+  --inline-code: #ffd080;
+  --inline-code-bg: rgba(255, 208, 128, .13);
+  --inline-code-border: rgba(255, 208, 128, .42);
   --syntax-heading: #ff8a58;
   --syntax-strong: #ff9f86;
   --syntax-emphasis: #c9a7ff;
@@ -65,9 +65,9 @@
   --danger: #d64055;
   --code-bg: #172033;
   --code-text: #e2e8f0;
-  --inline-code: #be123c;
-  --inline-code-bg: rgba(190, 18, 60, .10);
-  --inline-code-border: rgba(190, 18, 60, .30);
+  --inline-code: #8a5a00;
+  --inline-code-bg: rgba(180, 112, 0, .12);
+  --inline-code-border: rgba(180, 112, 0, .30);
   --syntax-heading: #bd432c;
   --syntax-strong: #a52c54;
   --syntax-emphasis: #7047a8;
@@ -530,9 +530,9 @@ button.primary:hover { background: var(--accent-strong); color: white; }
   --link: #0563c1;
   --code-bg: #f1f3f5;
   --code-text: #20242a;
-  --inline-code: #7c2d12;
-  --inline-code-bg: #f1f3f5;
-  --inline-code-border: #d5d9df;
+    --inline-code: #8a5a00;
+    --inline-code-bg: rgba(180, 112, 0, .12);
+    --inline-code-border: rgba(180, 112, 0, .30);
 }
 .hwpx-export-actions { align-items: center; }
 #hwpx-export-status,

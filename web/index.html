@@ -178,12 +178,12 @@
           <div id="heading-menu-popup" class="menu-popup toolbar-menu-popup" role="menu" hidden>
             <button type="button" role="menuitemradio" data-heading-level="0" aria-checked="true">Paragraph</button>
             <div class="menu-separator" role="separator"></div>
-            <button type="button" role="menuitemradio" data-heading-level="1" aria-checked="false">Heading 1</button>
-            <button type="button" role="menuitemradio" data-heading-level="2" aria-checked="false">Heading 2</button>
-            <button type="button" role="menuitemradio" data-heading-level="3" aria-checked="false">Heading 3</button>
-            <button type="button" role="menuitemradio" data-heading-level="4" aria-checked="false">Heading 4</button>
-            <button type="button" role="menuitemradio" data-heading-level="5" aria-checked="false">Heading 5</button>
-            <button type="button" role="menuitemradio" data-heading-level="6" aria-checked="false">Heading 6</button>
+            <button type="button" role="menuitemradio" data-heading-level="1" aria-checked="false">H1</button>
+            <button type="button" role="menuitemradio" data-heading-level="2" aria-checked="false">H2</button>
+            <button type="button" role="menuitemradio" data-heading-level="3" aria-checked="false">H3</button>
+            <button type="button" role="menuitemradio" data-heading-level="4" aria-checked="false">H4</button>
+            <button type="button" role="menuitemradio" data-heading-level="5" aria-checked="false">H5</button>
+            <button type="button" role="menuitemradio" data-heading-level="6" aria-checked="false">H6</button>
           </div>
         </div>
         <div class="toolbar-picker" data-toolbar-picker>
@@ -220,6 +220,15 @@
         </div>
         <button type="button" data-block-format="blockquote" data-i18n-title="Block quote" title="Block quote"
                 aria-label="Block quote" data-i18n-aria-label="Block quote">❝</button>
+        <button id="inline-code-button" type="button" data-format="inlineCode"
+                data-i18n-title="Inline code" title="Inline code"
+                aria-label="Inline code" data-i18n-aria-label="Inline code">
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M8.5 7L4 12l4.5 5"></path>
+            <path d="M15.5 7L20 12l-4.5 5"></path>
+            <path d="M13.5 5l-3 14"></path>
+          </svg>
+        </button>
         <div class="toolbar-picker table-picker" data-toolbar-picker>
           <button class="toolbar-picker-button" type="button" aria-haspopup="menu" aria-expanded="false"
                   data-i18n-title="Insert table" title="Insert table" aria-label="Insert table"

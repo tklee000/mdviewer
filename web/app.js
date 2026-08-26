@@ -1425,6 +1425,62 @@
     return node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
   }
 
+  function previewTextOffset(container, offset) {
+    try {
+      const range = document.createRange();
+      range.setStart(previewEditor, 0);
+      range.setEnd(container, offset);
+      return range.toString().length;
+    } catch {
+      return null;
+    }
+  }
+
+  function previewSelectionOffsets() {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    if (!previewEditor.contains(range.startContainer) || !previewEditor.contains(range.endContainer)) {
+      return null;
+    }
+    const start = previewTextOffset(range.startContainer, range.startOffset);
+    const end = previewTextOffset(range.endContainer, range.endOffset);
+    return start === null || end === null ? null : { start, end };
+  }
+
+  function previewTextPosition(offset) {
+    const target = Math.max(0, Number(offset) || 0);
+    const walker = document.createTreeWalker(previewEditor, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+      if (target <= consumed + node.length) {
+        return { container: node, offset: target - consumed };
+      }
+      consumed += node.length;
+    }
+    return { container: previewEditor, offset: previewEditor.childNodes.length };
+  }
+
+  function restorePreviewSelectionOffsets(offsets) {
+    if (!offsets) return false;
+    const start = previewTextPosition(offsets.start);
+    const end = previewTextPosition(offsets.end);
+    const range = document.createRange();
+    try {
+      range.setStart(start.container, start.offset);
+      range.setEnd(end.container, end.offset);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      previewSelectionRange = range.cloneRange();
+      return true;
+    } catch {
+      previewSelectionRange = null;
+      return false;
+    }
+  }
+
   function previewHeadingLevel() {
     const selection = window.getSelection();
     let node = selection?.rangeCount ? selection.anchorNode : null;
@@ -1436,10 +1492,11 @@
 
   function updateHeadingChrome() {
     const currentLevel = activeEditorMode() === "source" ? sourceHeadingLevel() : previewHeadingLevel();
-    $("#heading-button-label").textContent = `H${state.lastHeadingLevel}`;
+    const displayedLevel = currentLevel || state.lastHeadingLevel;
+    $("#heading-button-label").textContent = `H${displayedLevel}`;
     $$('[data-heading-level]').forEach((item) => {
       const level = Number(item.dataset.headingLevel);
-      item.textContent = level === 0 ? i18n.t("Paragraph") : `${i18n.t("Heading")} ${level}`;
+      item.textContent = level === 0 ? i18n.t("Paragraph") : `H${level}`;
       item.setAttribute("aria-checked", String(level === currentLevel));
     });
   }
@@ -1934,6 +1991,12 @@
 
   function normalizePreviewDom() {
     const blockTags = new Set(["BLOCKQUOTE", "HR", "OL", "P", "PRE", "TABLE", "UL"]);
+    // Chromium preserves a heading's appearance when Delete merges it into the
+    // previous paragraph by adding an inline font-size span. Markdown cannot
+    // represent that style, and applying a heading later would multiply it.
+    previewEditor.querySelectorAll("span[style]").forEach((span) => {
+      if (span.style.length === 1 && span.style.fontSize) span.replaceWith(...span.childNodes);
+    });
     previewEditor.querySelectorAll("li > li").forEach((nestedItem) => {
       const parentItem = nestedItem.parentElement;
       const parentList = parentItem?.parentElement;
@@ -1963,6 +2026,9 @@
       flushInline();
       parent.replaceWith(fragment);
     });
+    // Keep the editable tree identical to a fresh Markdown render after
+    // browser edits have unwrapped or moved inline nodes.
+    previewEditor.normalize();
   }
 
   function renderPreview() {
@@ -2221,6 +2287,7 @@
   function documentHistorySnapshot() {
     const previewActive = activeEditorMode() === "preview";
     let previewHtml = null;
+    const previewSelection = previewActive ? previewSelectionOffsets() : null;
     if (previewActive) {
       const clone = previewEditor.cloneNode(true);
       const sourceCheckboxes = [...previewEditor.querySelectorAll('input[type="checkbox"]')];
@@ -2233,6 +2300,7 @@
       text: previewActive ? previewToMarkdown() : sourceEditor.value,
       eol: state.eol,
       previewHtml,
+      previewSelection,
       sourceStart: sourceEditor.selectionStart,
       sourceEnd: sourceEditor.selectionEnd
     };
@@ -2280,7 +2348,10 @@
     }
     state.applying = false;
     markChanged();
-    (activeEditorMode() === "preview" ? previewEditor : sourceEditor).focus();
+    if (activeEditorMode() === "preview") {
+      previewEditor.focus();
+      restorePreviewSelectionOffsets(snapshot.previewSelection);
+    } else sourceEditor.focus();
     return true;
   }
 
@@ -2476,6 +2547,22 @@
     }
     commitPreviewChange();
     return true;
+  }
+
+  function insertPlainTextIntoPreview(text) {
+    return runPreviewFormatting(() => {
+      if (document.execCommand("insertText", false, text)) return;
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      if (!range) return;
+      range.deleteContents();
+      const inserted = document.createTextNode(text);
+      range.insertNode(inserted);
+      range.setStartAfter(inserted);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
   }
 
   function applySourceHeading(level) {
@@ -3059,6 +3146,18 @@
       return;
     }
 
+    if (command === "paste" && context.mode === "preview") {
+      closeMenus();
+      try {
+        const text = await navigator.clipboard.readText();
+        restoreEditorContextSelection(context);
+        insertPlainTextIntoPreview(text);
+      } catch (error) {
+        console.error("Clipboard paste failed", error);
+      }
+      return;
+    }
+
     let executed = false;
     let changed = false;
     if (context.mode === "source") {
@@ -3107,19 +3206,7 @@
         const caret = context.start + text.length;
         replaceSourceRange(context.start, context.end, text, caret, caret);
       } else {
-        runPreviewFormatting(() => {
-          if (document.execCommand("insertText", false, text)) return;
-          const selection = window.getSelection();
-          const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-          if (!range) return;
-          range.deleteContents();
-          const inserted = document.createTextNode(text);
-          range.insertNode(inserted);
-          range.setStartAfter(inserted);
-          range.collapse(true);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        });
+        insertPlainTextIntoPreview(text);
       }
     } catch (error) {
       console.error("Clipboard paste failed", error);
@@ -3825,7 +3912,13 @@
         const item = [...(event.clipboardData?.items || [])].find((candidate) =>
           candidate.kind === "file" && candidate.type.startsWith("image/"));
         const file = item?.getAsFile();
-        if (!file) return;
+        if (!file) {
+          if (editor !== previewEditor || !event.clipboardData) return;
+          event.preventDefault();
+          rememberPreviewSelection();
+          insertPlainTextIntoPreview(event.clipboardData.getData("text/plain"));
+          return;
+        }
         event.preventDefault();
         const pasteMode = activeEditorMode();
         const sourceSelection = pasteMode === "source"

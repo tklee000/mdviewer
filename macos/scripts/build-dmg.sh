@@ -61,7 +61,7 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/MdViewer.app"
 ln -s /Applications "$STAGE/Applications"
 
-OUTPUT="${OUTPUT:-$PROJECT_ROOT/out/MdViewer-0.2.0-$ARCHITECTURES.dmg}"
+OUTPUT="${OUTPUT:-$PROJECT_ROOT/out/MdViewer-0.3.0-$ARCHITECTURES.dmg}"
 mkdir -p "$(dirname -- "$OUTPUT")"
 rm -f -- "$OUTPUT"
 hdiutil create -volname "MdViewer" -srcfolder "$STAGE" \

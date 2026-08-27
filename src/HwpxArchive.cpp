@@ -486,7 +486,7 @@ bool BuildBytes(const Document& document, std::string* bytes,
         entries.push_back({
             "version.xml",
             ToBytes("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
-                  "<hv:HCFVersion xmlns:hv=\"http://www.hancom.co.kr/hwpml/2011/version\" tagetApplication=\"WORDPROCESSOR\" major=\"5\" minor=\"1\" micro=\"0\" buildNumber=\"1\" os=\"1\" xmlVersion=\"1.2\" application=\"MdViewer\" appVersion=\"0.2.1 Windows\"/>"),
+                  "<hv:HCFVersion xmlns:hv=\"http://www.hancom.co.kr/hwpml/2011/version\" tagetApplication=\"WORDPROCESSOR\" major=\"5\" minor=\"1\" micro=\"0\" buildNumber=\"1\" os=\"1\" xmlVersion=\"1.2\" application=\"MdViewer\" appVersion=\"0.3.0 Windows\"/>"),
             true});
         entries.push_back({"Contents/header.xml", ToBytes(BuildHeader(document.sansSerif)), true});
         for (const auto& image : document.images) {

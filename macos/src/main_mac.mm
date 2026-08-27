@@ -256,7 +256,7 @@ public:
     void ShowAbout() override {
         NSDictionary* options = @{
             NSAboutPanelOptionApplicationName: @"MdViewer",
-            NSAboutPanelOptionApplicationVersion: @"0.2.0",
+            NSAboutPanelOptionApplicationVersion: @"0.3.0",
             NSAboutPanelOptionCredits: [[NSAttributedString alloc]
                 initWithString:@"CEF-based Markdown viewer and editor"]
         };

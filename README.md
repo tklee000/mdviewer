@@ -34,6 +34,8 @@ Linux uses GTK3/X11, and macOS uses Cocoa. All three load the same editor UI.
 - Custom title bar with File/Edit/View/Help menus and window controls
 - Orange `M` application icon embedded in the executable and installer
 - Source/preview editing switch from both the title bar menu and toolbar
+- Optional source-editor line numbers, enabled by default
+- Modeless find bar with case-insensitive search, match navigation, and replace-all
 - Editable headings, paragraphs, emphasis, links, images, lists, task lists,
   blockquotes, fenced code blocks, horizontal rules, and tables
 - Professional formatting toolbar with undo/redo, strikethrough, inline/block

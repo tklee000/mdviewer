@@ -105,7 +105,7 @@ async function setSource(text, start = 0, end = text.length) {
   await evaluate(`(() => {
     const editor = document.querySelector('#source-editor');
     if (document.querySelector('#source-pane').hidden) {
-      document.querySelector('[data-status-mode="source"]').click();
+      document.querySelector('[data-mode-button="source"]').click();
     }
     editor.value = ${js(text)};
     editor.focus();
@@ -120,8 +120,8 @@ async function sourceValue() {
 
 async function setEditorMode(mode) {
   await evaluate(`(() => {
-    if (document.querySelector('#mode-toggle-button').dataset.currentMode !== ${js(mode)}) {
-      document.querySelector('[data-status-mode="${mode}"]').click();
+    if (document.querySelector('.toolbar-mode-switch').dataset.currentMode !== ${js(mode)}) {
+      document.querySelector('[data-mode-button="${mode}"]').click();
     }
   })()`);
 }
@@ -210,14 +210,96 @@ try {
   const initialModeLayout = await evaluate(`({
     previewVisible: !document.querySelector('#preview-pane').hidden,
     sourceHidden: document.querySelector('#source-pane').hidden,
-    currentMode: document.querySelector('#mode-toggle-button').dataset.currentMode,
-    toolbarModeSwitchRemoved: !document.querySelector('.toolbar .mode-switch'),
-    toggleIsFirstStatusItem: document.querySelector('.statusbar').firstElementChild?.id === 'mode-toggle-button'
+    currentMode: document.querySelector('.toolbar-mode-switch').dataset.currentMode,
+    toolbarModeOrder: [...document.querySelectorAll('.toolbar-mode-switch [data-mode-button]')]
+      .map((button) => button.dataset.modeButton),
+    toolbarSwitchIsRightmost: document.querySelector('.toolbar').lastElementChild
+      ?.classList.contains('toolbar-mode-switch'),
+    statusModeSwitchRemoved: !document.querySelector('#mode-toggle-button, #status-mode-menu')
   })`);
   assert.deepEqual(initialModeLayout, {
     previewVisible: true, sourceHidden: true, currentMode: "preview",
-    toolbarModeSwitchRemoved: true, toggleIsFirstStatusItem: true
-  }, "preview is the default and mode switching lives at bottom left");
+    toolbarModeOrder: ["source", "split", "preview"],
+    toolbarSwitchIsRightmost: true, statusModeSwitchRemoved: true
+  }, "preview is the default and mode switching lives at the toolbar right");
+
+  await click('[data-menu-command="edit.replace"]');
+  assert.deepEqual(await evaluate(`({
+    findOpen: !document.querySelector('#find-bar').hidden,
+    replaceOpen: !document.querySelector('#find-replace-row').hidden
+  })`), { findOpen: true, replaceOpen: true },
+  "Edit > Replace opens the find bar with replace controls");
+  await click('#find-close');
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'h', ctrlKey: true, bubbles: true, cancelable: true
+  }))`);
+  assert.equal(await evaluate("!document.querySelector('#find-replace-row').hidden"), true,
+    "Ctrl+H opens replace controls");
+  await click('#find-close');
+
+  await setSource("Alpha alpha beta alpha", 0, 0);
+  await click('#find-button');
+  await evaluate(`(() => {
+    const input = document.querySelector('#find-input');
+    input.value = 'alpha';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  })()`);
+  assert.deepEqual(await evaluate(`({
+    open: !document.querySelector('#find-bar').hidden,
+    count: document.querySelector('#find-count').textContent,
+    marks: document.querySelectorAll('#source-highlight-code mark.source-search-match').length,
+    current: document.querySelectorAll('#source-highlight-code mark.source-search-current').length,
+    caseSensitive: document.querySelector('#find-match-case').getAttribute('aria-pressed') === 'true'
+  })`), {
+    open: true, count: "1/3", marks: 3, current: 1, caseSensitive: false
+  }, "find bar opens with case-insensitive source matches");
+  await click('#find-next');
+  assert.equal(await evaluate("document.querySelector('#find-count').textContent"), "2/3",
+    "find next advances the current match");
+  await click('#find-replace-toggle');
+  assert.equal(await evaluate("!document.querySelector('#find-replace-row').hidden"), true,
+    "replace row expands from the find bar");
+  await evaluate(`(() => {
+    const input = document.querySelector('#find-replace-input');
+    input.value = 'omega';
+  })()`);
+  await click('#find-replace-current');
+  assert.equal(await sourceValue(), "Alpha omega beta alpha",
+    "replace current changes only the selected source match");
+  await evaluate(`document.querySelector('#find-replace-input').value = 'x'`);
+  await click('#find-replace-all');
+  assert.equal(await sourceValue(), "x omega beta x",
+    "replace all changes every case-insensitive source match");
+  await click('#find-match-case');
+  assert.equal(await evaluate("document.querySelector('#find-count').textContent"), "0/0",
+    "match case option updates the result count");
+  await click('#find-close');
+
+  await setSource("alpha **alpha**", 0, 0);
+  await setEditorMode("preview");
+  await click('#find-button');
+  await evaluate(`(() => {
+    const input = document.querySelector('#find-input');
+    input.value = 'alpha';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  })()`);
+  assert.deepEqual(await evaluate(`({
+    count: document.querySelector('#find-count').textContent,
+    marks: document.querySelectorAll('#preview-editor mark.preview-search-match').length
+  })`), { count: "1/2", marks: 2 },
+    "find highlights rendered preview text");
+  await click('#find-replace-toggle');
+  await evaluate(`document.querySelector('#find-replace-input').value = 'omega'`);
+  await click('#find-replace-current');
+  await setEditorMode("source");
+  assert.equal(await sourceValue(), "omega **alpha**",
+    "replace current changes the selected rendered-preview match");
+  await setSource("alpha **alpha**", 0, 0);
+  await setEditorMode("split");
+  assert.equal(await evaluate(`document.querySelectorAll('#source-highlight-code mark.source-search-match').length > 0 &&
+    document.querySelectorAll('#preview-editor mark.preview-search-match').length > 0`), true,
+    "split view highlights source and preview matches together");
+  await click('#find-close');
 
   await setSource("alpha beta", 0, 5);
   const sourceContextMenu = await evaluate(`(() => {
@@ -1017,16 +1099,12 @@ try {
   })()`), { title: "cloud-copy.md", dirty: true },
   "Drive Save As can relocate a document while preserving newer dirty edits");
 
-  await click("#mode-toggle-button");
-  assert.equal(await evaluate("!document.querySelector('#status-mode-menu').hidden"), true,
-    "bottom-left mode button opens the view menu");
-  await click('[data-status-mode="source"]');
+  await click('[data-mode-button="source"]');
   assert.equal(await evaluate("!document.querySelector('#source-pane').hidden"), true,
-    "bottom-left mode button switches to source");
-  await click("#mode-toggle-button");
-  await click('[data-status-mode="preview"]');
+    "toolbar mode button switches to source");
+  await click('[data-mode-button="preview"]');
   assert.equal(await evaluate("!document.querySelector('#preview-pane').hidden"), true,
-    "bottom-left mode button switches back to preview");
+    "toolbar mode button switches back to preview");
 
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1200, height: 800, deviceScaleFactor: 1, mobile: false
@@ -1075,7 +1153,7 @@ try {
     const preview = document.querySelector('#preview-pane').getBoundingClientRect();
     const divider = document.querySelector('#split-divider').getBoundingClientRect();
     return {
-      mode: document.querySelector('#mode-toggle-button').dataset.currentMode,
+      mode: document.querySelector('.toolbar-mode-switch').dataset.currentMode,
       sourceVisible: !document.querySelector('#source-pane').hidden,
       previewVisible: !document.querySelector('#preview-pane').hidden,
       dividerVisible: !document.querySelector('#split-divider').hidden,
@@ -1084,7 +1162,7 @@ try {
       dividerWidth: divider.width
     };
   })()`);
-  assert.equal(splitLayout.mode, "split", "bottom-left menu selects split mode");
+  assert.equal(splitLayout.mode, "split", "toolbar selects split mode");
   assert.equal(splitLayout.sourceVisible && splitLayout.previewVisible && splitLayout.dividerVisible, true,
     `split panes visible: ${JSON.stringify(splitLayout)}`);
   assert.ok(Math.abs(splitLayout.sourceWidth - splitLayout.previewWidth) <= 8,
@@ -1157,7 +1235,7 @@ try {
   });
   await delay(50);
   assert.equal(await evaluate(`(() => {
-    return document.querySelector('#mode-toggle-button').dataset.currentMode === 'preview' &&
+    return document.querySelector('.toolbar-mode-switch').dataset.currentMode === 'preview' &&
       document.querySelector('#source-pane').hidden && document.querySelector('#split-divider').hidden;
   })()`), true, "narrow window falls back from split to the active single editor");
   await send("Emulation.setDeviceMetricsOverride", {
@@ -1170,8 +1248,24 @@ try {
   await verifySourceCommand("alpha", '[data-format="inlineCode"]', "`alpha`");
   await verifySourceCommand("alpha", "#inline-code-button", "`alpha`");
   await verifySourceCommand("alpha", '[data-format="codeBlock"]', "```\nalpha\n```");
-  await evaluate("window.prompt = () => 'https://example.com'");
-  await verifySourceCommand("alpha", '[data-format="link"]', "[alpha](https://example.com)");
+  await setSource("alpha", 0, 5);
+  await click('[data-format="link"]');
+  assert.deepEqual(await evaluate(`({
+    open: document.querySelector('#link-dialog').open,
+    title: document.querySelector('#link-dialog-title').textContent,
+    address: document.querySelector('#link-address-input').value
+  })`), { open: true, title: "Link", address: "https://" },
+  "link formatting uses the in-app dialog without exposing the app origin");
+  await evaluate(`(async () => {
+    document.querySelector('#link-address-input').value = 'https://example.com';
+    document.querySelector('#link-dialog-form').requestSubmit();
+    await new Promise(requestAnimationFrame);
+  })()`);
+  assert.equal(await sourceValue(), "[alpha](https://example.com)", "link insert");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await sourceValue(), "alpha", "link undo");
+  await click('[data-editor-command="redo"]');
+  assert.equal(await sourceValue(), "[alpha](https://example.com)", "link redo");
   await verifySourceCommand("**bold** and *italic*", '[data-format="clear"]', "bold and italic");
   await verifySourceCommand("one\ntwo", '[data-block-format="bulletList"]', "- one\n- two");
   await verifySourceCommand("one\ntwo", '[data-block-format="orderedList"]', "1. one\n2. two");
@@ -1481,8 +1575,26 @@ try {
     "Boolean(document.querySelector('#preview-editor p code'))");
   await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="codeBlock"]',
     "Boolean(document.querySelector('#preview-editor pre'))");
-  await verifyPreviewCommand("alpha", "#preview-editor p", '[data-format="link"]',
-    "Boolean(document.querySelector('#preview-editor a[href]'))");
+  await setPreviewSelection("alpha", "#preview-editor p");
+  const previewBeforeLink = await evaluate("document.querySelector('#preview-editor').innerHTML");
+  await click('[data-format="link"]');
+  assert.equal(await evaluate("document.querySelector('#link-dialog').open"), true,
+    "preview link opens the in-app dialog");
+  await evaluate(`(async () => {
+    document.querySelector('#link-address-input').value = 'https://example.com';
+    document.querySelector('#link-dialog-form').requestSubmit();
+    await new Promise(requestAnimationFrame);
+  })()`);
+  const previewAfterLink = await evaluate("document.querySelector('#preview-editor').innerHTML");
+  assert.equal(await evaluate("Boolean(document.querySelector('#preview-editor a[href]'))"), true,
+    "preview link insert");
+  assert.notEqual(previewAfterLink, previewBeforeLink, "preview link changed");
+  await click('[data-editor-command="undo"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor').innerHTML"), previewBeforeLink,
+    "preview link undo");
+  await click('[data-editor-command="redo"]');
+  assert.equal(await evaluate("document.querySelector('#preview-editor').innerHTML"), previewAfterLink,
+    "preview link redo");
   await verifyPreviewCommand("**alpha**", "#preview-editor strong", '[data-format="clear"]',
     "!document.querySelector('#preview-editor strong, #preview-editor b')");
   await verifyPreviewCommand("one", "#preview-editor p", '[data-block-format="bulletList"]',
@@ -1672,7 +1784,7 @@ try {
       const ensureMode = async (mode) => {
         const sourceVisible = !document.querySelector('#source-pane').hidden;
         if ((mode === 'source') !== sourceVisible) {
-          document.querySelector('[data-status-mode="' + mode + '"]').click();
+          document.querySelector('[data-mode-button="' + mode + '"]').click();
           await pause();
         }
       };

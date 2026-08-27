@@ -10,6 +10,8 @@
   const sourceEditor = $("#source-editor");
   const sourceHighlight = $("#source-highlight");
   const sourceHighlightCode = $("#source-highlight-code");
+  const sourceLineNumbers = $("#source-line-numbers");
+  const sourceLineNumbersCode = $("#source-line-numbers-code");
   const previewEditor = $("#preview-editor");
   const sourceFonts = Object.freeze({
     consolas: 'Consolas, "Noto Sans Mono", monospace',
@@ -54,6 +56,7 @@
     sourceFontSize: storedSize("mdviewer.sourceFontSize", sourceFontSizes, 15),
     previewFont: storedChoice("mdviewer.previewFont", previewFonts, "default"),
     previewFontSize: storedSize("mdviewer.previewFontSize", previewFontSizes, 16),
+    showLineNumbers: localStorage.getItem("mdviewer.showLineNumbers") !== "false",
     lastHeadingLevel: Number.isInteger(storedHeadingLevel) && storedHeadingLevel >= 1 && storedHeadingLevel <= 6
       ? storedHeadingLevel : 2,
     hidePreviewSpelling: localStorage.getItem("mdviewer.hidePreviewSpelling") === "true",
@@ -73,9 +76,17 @@
   let sourceBeforeInputRecorded = false;
   let splitScrollFrame = 0;
   let synchronizingSplitScroll = false;
+  let pendingLinkSourceSelection = null;
   let pendingImageSourceSelection = null;
   let pendingImageFileName = "";
   let editorContext = null;
+  let findQuery = "";
+  let findCurrentIndex = 0;
+  let findMatchCase = localStorage.getItem("mdviewer.findMatchCase") === "true";
+  let findSourceRanges = [];
+  let findPreviewRanges = [];
+  let findSourceMarks = [];
+  let findPreviewMarks = [];
   let recentDocumentItems = [];
   let toastHideTimer = 0;
   let toastRemoveTimer = 0;
@@ -106,6 +117,7 @@
       $(".editor-stage").dataset.activeEditor = mode;
       updateChrome();
     }
+    updateFindCount();
   }
 
   function post(type, payload = {}) {
@@ -176,14 +188,18 @@
     rootStyle.setProperty("--preview-font-family", previewFonts[state.previewFont]);
     rootStyle.setProperty("--preview-font-size", `${state.previewFontSize}px`);
     previewEditor.setAttribute("spellcheck", String(!state.hidePreviewSpelling));
+    sourceLineNumbers.hidden = !state.showLineNumbers;
     updateSourceHighlight();
 
     localStorage.setItem("mdviewer.sourceFont", state.sourceFont);
     localStorage.setItem("mdviewer.sourceFontSize", String(state.sourceFontSize));
     localStorage.setItem("mdviewer.previewFont", state.previewFont);
     localStorage.setItem("mdviewer.previewFontSize", String(state.previewFontSize));
+    localStorage.setItem("mdviewer.showLineNumbers", String(state.showLineNumbers));
     localStorage.setItem("mdviewer.hidePreviewSpelling", String(state.hidePreviewSpelling));
 
+    $("#source-line-numbers-menu").setAttribute(
+      "aria-checked", String(state.showLineNumbers));
     $("#preview-spelling-menu").setAttribute(
       "aria-checked", String(state.hidePreviewSpelling));
   }
@@ -1564,12 +1580,20 @@
   function syncSourceHighlightScroll() {
     sourceHighlight.scrollTop = sourceEditor.scrollTop;
     sourceHighlight.scrollLeft = sourceEditor.scrollLeft;
+    sourceLineNumbersCode.style.transform = `translateY(${-sourceEditor.scrollTop}px)`;
   }
 
   function updateSourceHighlight() {
+    const lines = sourceEditor.value.split("\n");
+    const lineCount = Math.max(1, lines.length);
+    const digitCount = String(lineCount).length;
+    document.documentElement.style.setProperty(
+      "--source-line-number-width", state.showLineNumbers ? `calc(${digitCount}em + 24px)` : "0px");
+    sourceLineNumbersCode.innerHTML = lines.map((_, index) => `<span>${index + 1}</span>`).join("");
     const trailingLine = sourceEditor.value.endsWith("\n") ? " " : "";
     sourceHighlightCode.innerHTML = renderSourceHighlight(sourceEditor.value) + trailingLine;
     syncSourceHighlightScroll();
+    refreshFindHighlights();
   }
 
   function safeLinkUrl(value) {
@@ -2037,6 +2061,7 @@
     previewSelectionRange = null;
     state.previewChanged = false;
     state.applying = false;
+    refreshFindHighlights();
   }
 
   function sourceViewportLine() {
@@ -2149,20 +2174,15 @@
     $("#encoding-status").textContent = state.format === "mdz"
       ? `MDZ · ${state.encoding}` : state.encoding;
     $("#eol-status").textContent = state.eol;
-    const modeToggle = $("#mode-toggle-button");
-    const modeKeys = { source: "Source", split: "Split", preview: "Preview" };
-    const modeIcons = { source: "</>", split: "◫", preview: "▣" };
-    $("#mode-toggle-icon").textContent = modeIcons[state.mode];
-    $("#mode-status").textContent = i18n.t(modeKeys[state.mode]);
-    modeToggle.dataset.currentMode = state.mode;
-    modeToggle.title = i18n.t("Editor mode");
-    modeToggle.setAttribute("aria-label", modeToggle.title);
+    $(".toolbar-mode-switch").dataset.currentMode = state.mode;
+    $$('[data-mode-button]').forEach((button) =>
+      button.setAttribute("aria-pressed", String(button.dataset.modeButton === state.mode)));
     $(".editor-stage").dataset.viewMode = state.mode;
     $(".editor-stage").dataset.activeEditor = activeEditorMode();
     $(".editor-stage").style.setProperty("--split-source-width", `${state.splitRatio}%`);
     $$('[data-mode-menu]').forEach((item) =>
       item.setAttribute("aria-checked", String(item.dataset.modeMenu === state.mode)));
-    $$('[data-mode-menu="split"]').forEach((item) => {
+    $$('[data-mode-menu="split"], [data-mode-button="split"]').forEach((item) => {
       item.disabled = innerWidth < splitMinimumWidth && state.mode !== "split";
     });
     $$('[data-eol-menu]').forEach((item) =>
@@ -2219,6 +2239,7 @@
         if (state.mode !== "source") scrollPreviewToSourceLine(previewSourceLine);
       });
     }
+    refreshFindHighlights();
     if (notifyNative) post("editor.modeChanged", { mode });
   }
 
@@ -2246,22 +2267,272 @@
     updateChrome();
   }
 
-  function findText() {
-    const query = window.prompt(i18n.t("Text to find"));
-    if (!query) return;
-    if (activeEditorMode() === "preview") {
-      window.find(query, false, false, true, false, false, false);
+  function findRanges(value, query, matchCase = findMatchCase) {
+    const text = String(value || "");
+    const needle = String(query || "");
+    if (!needle) return [];
+    const haystack = matchCase ? text : text.toLocaleLowerCase(i18n.locale);
+    const normalizedNeedle = matchCase ? needle : needle.toLocaleLowerCase(i18n.locale);
+    if (!normalizedNeedle) return [];
+    const ranges = [];
+    let offset = 0;
+    while (offset <= haystack.length - normalizedNeedle.length) {
+      const start = haystack.indexOf(normalizedNeedle, offset);
+      if (start < 0) break;
+      ranges.push({ start, end: start + needle.length });
+      offset = start + Math.max(1, normalizedNeedle.length);
+    }
+    return ranges;
+  }
+
+  function clearFindMarks(root) {
+    root.querySelectorAll("mark.source-search-match, mark.preview-search-match").forEach((mark) => {
+      mark.replaceWith(...mark.childNodes);
+    });
+    root.normalize();
+  }
+
+  function wrapFindMarks(root, query, className, ranges) {
+    if (!query || !ranges.length) return [];
+    const rangeIndexes = new Map(ranges.map((range, index) => [range.start, index]));
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    const marks = [];
+    let textOffset = 0;
+    textNodes.forEach((node) => {
+      const value = node.nodeValue || "";
+      const localRanges = findRanges(value, query);
+      if (!localRanges.length) {
+        textOffset += value.length;
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      let offset = 0;
+      localRanges.forEach((range) => {
+        if (range.start < offset) return;
+        if (range.start > offset) fragment.append(document.createTextNode(value.slice(offset, range.start)));
+        const mark = document.createElement("mark");
+        mark.className = className;
+        const index = rangeIndexes.get(textOffset + range.start);
+        if (index === undefined) {
+          fragment.append(document.createTextNode(value.slice(range.start, range.end)));
+          offset = range.end;
+          return;
+        }
+        mark.dataset.findIndex = String(index);
+        mark.textContent = value.slice(range.start, range.end);
+        fragment.append(mark);
+        marks.push(mark);
+        offset = range.end;
+      });
+      if (offset < value.length) fragment.append(document.createTextNode(value.slice(offset)));
+      node.replaceWith(fragment);
+      textOffset += value.length;
+    });
+    return marks;
+  }
+
+  function setCurrentFindMarks(marks) {
+    marks.forEach((mark) => mark.classList.toggle(
+      mark.classList.contains("source-search-match") ? "source-search-current" : "preview-search-current",
+      mark.dataset.findIndex === String(findCurrentIndex)));
+  }
+
+  function updateFindCount() {
+    const bar = $("#find-bar");
+    if (!bar || bar.hidden) return;
+    const count = activeEditorMode() === "preview" ? findPreviewRanges.length : findSourceRanges.length;
+    findCurrentIndex = count ? Math.min(findCurrentIndex, count - 1) : 0;
+    $("#find-count").textContent = count ? `${findCurrentIndex + 1}/${count}` : "0/0";
+    $("#find-previous").disabled = count === 0;
+    $("#find-next").disabled = count === 0;
+    $("#find-replace-current").disabled = count === 0;
+    $("#find-replace-all").disabled = count === 0;
+  }
+
+  function rangeForTextOffsets(root, start, end) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let offset = 0;
+    let startPoint = null;
+    let endPoint = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const length = (node.nodeValue || "").length;
+      if (!startPoint && start <= offset + length) {
+        startPoint = { node, offset: Math.max(0, start - offset) };
+      }
+      if (end <= offset + length) {
+        endPoint = { node, offset: Math.max(0, end - offset) };
+        break;
+      }
+      offset += length;
+    }
+    if (!startPoint || !endPoint) return null;
+    const range = document.createRange();
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    return range;
+  }
+
+  function selectCurrentFindMatch() {
+    if (!findQuery) return;
+    const findBar = $("#find-bar");
+    const preserveFindFocus = Boolean(
+      findBar && document.activeElement && findBar.contains(document.activeElement));
+    if (activeEditorMode() === "source") {
+      const match = findSourceRanges[findCurrentIndex];
+      if (!match) return;
+      if (!preserveFindFocus) sourceEditor.setSelectionRange(match.start, match.end);
+      const line = sourceEditor.value.slice(0, match.start).split("\n").length - 1;
+      scrollSourceToLine(line);
+      if (!preserveFindFocus) updatePosition();
       return;
     }
-    const haystack = sourceEditor.value.toLocaleLowerCase(i18n.locale);
-    const needle = query.toLocaleLowerCase(i18n.locale);
-    let index = haystack.indexOf(needle, sourceEditor.selectionEnd);
-    if (index < 0) index = haystack.indexOf(needle);
-    if (index >= 0) {
-      sourceEditor.focus();
-      sourceEditor.setSelectionRange(index, index + query.length);
-      updatePosition();
+    const match = findPreviewRanges[findCurrentIndex];
+    if (!match) return;
+    const mark = findPreviewMarks.find((item) => item.dataset.findIndex === String(findCurrentIndex));
+    if (preserveFindFocus) {
+      mark?.scrollIntoView({ block: "nearest" });
+      return;
     }
+    const range = rangeForTextOffsets(previewEditor, match.start, match.end);
+    if (!range) return;
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    (mark || range.commonAncestorContainer.parentElement)?.scrollIntoView({ block: "nearest" });
+  }
+
+  function refreshFindHighlights({ selectMatch = false } = {}) {
+    clearFindMarks(sourceHighlightCode);
+    clearFindMarks(previewEditor);
+    findSourceRanges = findQuery ? findRanges(sourceEditor.value, findQuery) : [];
+    const previewText = findQuery ? (previewEditor.textContent || "") : "";
+    findPreviewRanges = findQuery ? findRanges(previewText, findQuery) : [];
+    findSourceMarks = wrapFindMarks(sourceHighlightCode, findQuery, "source-search-match", findSourceRanges);
+    findPreviewMarks = wrapFindMarks(previewEditor, findQuery, "preview-search-match", findPreviewRanges);
+    const count = activeEditorMode() === "preview" ? findPreviewRanges.length : findSourceRanges.length;
+    findCurrentIndex = count ? Math.min(findCurrentIndex, count - 1) : 0;
+    setCurrentFindMarks(findSourceMarks);
+    setCurrentFindMarks(findPreviewMarks);
+    updateFindCount();
+    if (selectMatch && findQuery && count) selectCurrentFindMatch();
+  }
+
+  function moveFindMatch(direction) {
+    const count = activeEditorMode() === "preview" ? findPreviewRanges.length : findSourceRanges.length;
+    if (!count) return;
+    findCurrentIndex = (findCurrentIndex + direction + count) % count;
+    refreshFindHighlights({ selectMatch: true });
+  }
+
+  function replaceTextAtRanges(text, ranges, replacement) {
+    let output = String(text || "");
+    for (let index = ranges.length - 1; index >= 0; index -= 1) {
+      const range = ranges[index];
+      output = output.slice(0, range.start) + replacement + output.slice(range.end);
+    }
+    return output;
+  }
+
+  function replaceCurrentFindMatch() {
+    const replacement = $("#find-replace-input").value;
+    if (activeEditorMode() === "source") {
+      const match = findSourceRanges[findCurrentIndex];
+      if (!match) return;
+      replaceSourceRange(match.start, match.end, replacement,
+        match.start, match.start + replacement.length);
+      return;
+    }
+    const match = findPreviewRanges[findCurrentIndex];
+    if (!match) return;
+    clearFindMarks(previewEditor);
+    const range = rangeForTextOffsets(previewEditor, match.start, match.end);
+    if (!range) return;
+    rememberPreviewFormatting();
+    range.deleteContents();
+    const node = document.createTextNode(replacement);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    applyingPreviewFormatting = false;
+    commitPreviewChange();
+  }
+
+  function replaceAllFindMatches() {
+    const replacement = $("#find-replace-input").value;
+    if (activeEditorMode() === "source") {
+      if (!findSourceRanges.length) return;
+      const result = replaceTextAtRanges(sourceEditor.value, findSourceRanges, replacement);
+      findCurrentIndex = 0;
+      replaceSourceRange(0, sourceEditor.value.length, result, 0, 0);
+      return;
+    }
+    if (!findPreviewRanges.length) return;
+    clearFindMarks(previewEditor);
+    rememberPreviewFormatting();
+    for (let index = findPreviewRanges.length - 1; index >= 0; index -= 1) {
+      const match = findPreviewRanges[index];
+      const range = rangeForTextOffsets(previewEditor, match.start, match.end);
+      if (!range) continue;
+      range.deleteContents();
+      range.insertNode(document.createTextNode(replacement));
+    }
+    findCurrentIndex = 0;
+    applyingPreviewFormatting = false;
+    commitPreviewChange();
+  }
+
+  function toggleFindReplaceRow() {
+    const row = $("#find-replace-row");
+    const expanded = row.hidden;
+    row.hidden = !expanded;
+    $("#find-replace-toggle").setAttribute("aria-expanded", String(expanded));
+    if (expanded) requestAnimationFrame(() => $("#find-replace-input").focus());
+  }
+
+  function openFindBar({ showReplace = false } = {}) {
+    const bar = $("#find-bar");
+    $("#find-match-case").setAttribute("aria-pressed", String(findMatchCase));
+    bar.hidden = false;
+    if (showReplace) {
+      $("#find-replace-row").hidden = false;
+      $("#find-replace-toggle").setAttribute("aria-expanded", "true");
+    }
+    refreshFindHighlights();
+    requestAnimationFrame(() => {
+      const input = $("#find-input");
+      input.focus();
+      input.select();
+    });
+  }
+
+  function closeFindBar() {
+    $("#find-bar").hidden = true;
+    $("#find-input").value = "";
+    $("#find-replace-input").value = "";
+    $("#find-replace-row").hidden = true;
+    $("#find-replace-toggle").setAttribute("aria-expanded", "false");
+    findQuery = "";
+    findCurrentIndex = 0;
+    clearFindMarks(sourceHighlightCode);
+    clearFindMarks(previewEditor);
+    findSourceRanges = [];
+    findPreviewRanges = [];
+    findSourceMarks = [];
+    findPreviewMarks = [];
+  }
+
+  function findText() {
+    openFindBar();
+  }
+
+  function replaceText() {
+    openFindBar({ showReplace: true });
   }
 
   function editorCommand(name) {
@@ -2281,6 +2552,7 @@
       return;
     }
     if (name === "find") { findText(); return; }
+    if (name === "replace") { replaceText(); return; }
     document.execCommand(name, false);
   }
 
@@ -2533,6 +2805,7 @@
     rememberPreviewSelection();
     updateHeadingChrome();
     updateFormattingChrome();
+    refreshFindHighlights();
   }
 
   function runPreviewFormatting(callback) {
@@ -2609,12 +2882,7 @@
   function applyFormatting(format) {
     if (activeEditorMode() === "preview") {
       if (format === "image") { openImageDialog(); return; }
-      if (format === "link") {
-        const address = window.prompt(i18n.t("Link address"), "https://");
-        if (!address) return;
-        runPreviewFormatting(() => document.execCommand("createLink", false, address));
-        return;
-      }
+      if (format === "link") { openLinkDialog(); return; }
       runPreviewFormatting(() => {
         if (format === "bold" || format === "italic") document.execCommand(format, false);
         else if (format === "strike") document.execCommand("strikeThrough", false);
@@ -2644,10 +2912,7 @@
     else if (format === "codeBlock") applySourceCodeBlock();
     else if (format === "clear") clearSourceFormatting();
     else if (format === "image") openImageDialog();
-    else if (format === "link") {
-      const address = window.prompt(i18n.t("Link address"), "https://");
-      if (address) wrapSource("[", `](${address})`, i18n.t("Link"));
-    }
+    else if (format === "link") openLinkDialog();
   }
 
   function applyBlockFormatting(format) {
@@ -2698,6 +2963,39 @@
       return source.replaceAll(" ", "%20").replaceAll("(", "%28").replaceAll(")", "%29");
     }
     return source.split("/").map((part) => encodeURIComponent(part)).join("/");
+  }
+
+  function openLinkDialog() {
+    if (activeEditorMode() === "preview") {
+      rememberPreviewSelection();
+      pendingLinkSourceSelection = null;
+    } else {
+      pendingLinkSourceSelection = {
+        start: sourceEditor.selectionStart,
+        end: sourceEditor.selectionEnd
+      };
+    }
+    const input = $("#link-address-input");
+    input.value = "https://";
+    $("#link-dialog").showModal();
+    input.focus();
+    input.select();
+  }
+
+  function insertLink(address) {
+    const normalizedAddress = String(address || "").trim();
+    if (!normalizedAddress) return;
+    if (activeEditorMode() === "source") {
+      if (pendingLinkSourceSelection) {
+        sourceEditor.setSelectionRange(
+          pendingLinkSourceSelection.start, pendingLinkSourceSelection.end);
+      }
+      wrapSource("[", `](${normalizedAddress})`, i18n.t("Link"));
+    } else {
+      runPreviewFormatting(() =>
+        document.execCommand("createLink", false, normalizedAddress));
+    }
+    pendingLinkSourceSelection = null;
   }
 
   function openImageDialog() {
@@ -3052,8 +3350,6 @@
     $$('[data-toolbar-picker] > button[aria-expanded]').forEach((trigger) =>
       trigger.setAttribute("aria-expanded", "false"));
     $$('[data-toolbar-picker] > .menu-popup').forEach((popup) => { popup.hidden = true; });
-    $("#status-mode-menu").hidden = true;
-    $("#mode-toggle-button").setAttribute("aria-expanded", "false");
     $("#editor-context-menu").hidden = true;
   }
 
@@ -3213,16 +3509,6 @@
     }
   }
 
-  function toggleStatusModeMenu() {
-    const popup = $("#status-mode-menu");
-    const opening = popup.hidden;
-    closeMenus();
-    if (opening) {
-      popup.hidden = false;
-      $("#mode-toggle-button").setAttribute("aria-expanded", "true");
-    }
-  }
-
   function toggleHeadingMenu() {
     const trigger = $("#heading-menu-button");
     const popup = $("#heading-menu-popup");
@@ -3356,6 +3642,9 @@
       setEol(name.slice(4).toUpperCase());
     } else if (name === "view.fontSettings") {
       openFontSettings();
+    } else if (name === "view.toggleLineNumbers") {
+      state.showLineNumbers = !state.showLineNumbers;
+      applyEditorPreferences();
     } else if (name === "view.togglePreviewSpelling") {
       state.hidePreviewSpelling = !state.hidePreviewSpelling;
       applyEditorPreferences();
@@ -3420,13 +3709,10 @@
       closeMenus();
     });
 
-    $("#mode-toggle-button").addEventListener("click", toggleStatusModeMenu);
-    $("#status-mode-menu").addEventListener("click", (event) => {
-      const item = event.target.closest("[data-status-mode]");
-      if (!item || item.disabled) return;
-      setMode(item.dataset.statusMode);
-      closeMenus();
-    });
+    $$('[data-mode-button]').forEach((button) =>
+      button.addEventListener("click", () => {
+        if (!button.disabled) setMode(button.dataset.modeButton);
+      }));
     const splitDivider = $("#split-divider");
     const updateSplitRatio = (clientX) => {
       const bounds = $(".editor-stage").getBoundingClientRect();
@@ -3467,6 +3753,39 @@
       const theme = state.theme === "dark" ? "light" : "dark";
       applyTheme(theme);
       post("settings.themeChanged", { theme });
+    });
+    $("#find-button").addEventListener("click", openFindBar);
+    $("#find-replace-toggle").addEventListener("click", toggleFindReplaceRow);
+    $("#find-close").addEventListener("click", closeFindBar);
+    $("#find-previous").addEventListener("click", () => moveFindMatch(-1));
+    $("#find-next").addEventListener("click", () => moveFindMatch(1));
+    $("#find-match-case").addEventListener("click", (event) => {
+      findMatchCase = !findMatchCase;
+      event.currentTarget.setAttribute("aria-pressed", String(findMatchCase));
+      localStorage.setItem("mdviewer.findMatchCase", String(findMatchCase));
+      findCurrentIndex = 0;
+      refreshFindHighlights();
+    });
+    $("#find-input").addEventListener("input", (event) => {
+      findQuery = event.target.value;
+      findCurrentIndex = 0;
+      refreshFindHighlights();
+    });
+    $("#find-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        moveFindMatch(event.shiftKey ? -1 : 1);
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveFindMatch(event.key === "ArrowUp" ? -1 : 1);
+      }
+    });
+    $("#find-replace-current").addEventListener("click", replaceCurrentFindMatch);
+    $("#find-replace-all").addEventListener("click", replaceAllFindMatches);
+    $("#find-replace-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      replaceCurrentFindMatch();
     });
     $$(".format-actions button, .table-context-actions button").forEach((button) =>
       button.addEventListener("pointerdown", () => {
@@ -3509,6 +3828,28 @@
       button.addEventListener("click", () => fontDialog.close("cancel")));
     fontDialog.addEventListener("click", (event) => {
       if (event.target === fontDialog) fontDialog.close("cancel");
+    });
+
+    const linkDialog = $("#link-dialog");
+    $("#link-dialog-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const address = $("#link-address-input").value;
+      linkDialog.close("insert");
+      requestAnimationFrame(() => insertLink(address));
+    });
+    $$('[data-link-dialog-cancel]').forEach((button) =>
+      button.addEventListener("click", () => {
+        pendingLinkSourceSelection = null;
+        linkDialog.close("cancel");
+      }));
+    linkDialog.addEventListener("cancel", () => {
+      pendingLinkSourceSelection = null;
+    });
+    linkDialog.addEventListener("click", (event) => {
+      if (event.target === linkDialog) {
+        pendingLinkSourceSelection = null;
+        linkDialog.close("cancel");
+      }
     });
 
     const imageDialog = $("#image-dialog");
@@ -3782,7 +4123,7 @@
       closeMenus();
     });
     document.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest(".main-menu, [data-toolbar-picker], #mode-toggle-button, #status-mode-menu, #editor-context-menu")) {
+      if (!event.target.closest(".main-menu, [data-toolbar-picker], #editor-context-menu")) {
         closeMenus();
       }
     });
@@ -3981,6 +4322,8 @@
         const modes = innerWidth >= splitMinimumWidth
           ? ["source", "split", "preview"] : ["source", "preview"];
         setMode(modes[(modes.indexOf(state.mode) + 1) % modes.length]);
+      } else if (key === "h" && !event.shiftKey) {
+        event.preventDefault(); replaceText();
       } else if (key === "f") {
         event.preventDefault(); findText();
       }

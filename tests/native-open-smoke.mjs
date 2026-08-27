@@ -217,7 +217,7 @@ try {
 
   const initialSource = await evaluate("document.querySelector('#source-editor').value");
   await evaluate(`(async () => {
-    document.querySelector('[data-status-mode="source"]').click();
+    document.querySelector('[data-mode-button="source"]').click();
     const editor = document.querySelector('#source-editor');
     editor.focus();
     editor.setSelectionRange(0, 0);
@@ -264,7 +264,7 @@ try {
   "Empty new document did not open the forwarded document.");
 
   await evaluate(`(() => {
-    document.querySelector('[data-status-mode="source"]').click();
+    document.querySelector('[data-mode-button="source"]').click();
     const editor = document.querySelector('#source-editor');
     editor.dispatchEvent(new InputEvent('beforeinput', {
       bubbles: true, cancelable: true, inputType: 'insertText', data: '\\nNative dirty-window smoke edit'

@@ -362,7 +362,7 @@ public:
     void ShowAbout() override {
         gtk_show_about_dialog(
             window_ ? GTK_WINDOW(window_) : nullptr,
-            "program-name", "MdViewer", "version", "0.2.0",
+            "program-name", "MdViewer", "version", "0.3.0",
             "comments", "CEF-based Markdown viewer and editor",
             "copyright", "Copyright © MdViewer contributors", nullptr);
     }

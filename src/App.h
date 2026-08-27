@@ -126,6 +126,7 @@ private:
     void SetLanguage(const std::wstring& language);
     void SetTheme(const std::wstring& theme);
     void ApplyNativeTheme();
+    void ApplyNativeWindowFrame();
 
     bool ConfirmSaveChanges(std::function<void()> afterSave = {});
     void NewDocument();

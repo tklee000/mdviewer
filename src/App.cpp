@@ -520,10 +520,32 @@ bool DesktopApp::RegisterWindowClass() {
 bool DesktopApp::CreateMainWindow(int showCommand) {
     RECT bounds{0, 0, config_.windowWidth, config_.windowHeight};
     AdjustWindowRectEx(&bounds, kMainWindowStyle, FALSE, 0);
+    int windowX = CW_USEDEFAULT;
+    int windowY = CW_USEDEFAULT;
+    int windowWidth = bounds.right - bounds.left;
+    int windowHeight = bounds.bottom - bounds.top;
+
+    // Keep the initial restored window inside the monitor work area. This is
+    // especially important for a saved size that was recorded on a larger
+    // display, and prevents the first window from covering the taskbar.
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+        const HMONITOR monitor = MonitorFromPoint(
+            cursor, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo{sizeof(monitorInfo)};
+        if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+            const int workWidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+            const int workHeight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+            windowWidth = (std::min)(windowWidth, workWidth);
+            windowHeight = (std::min)(windowHeight, workHeight);
+            windowX = monitorInfo.rcWork.left + (workWidth - windowWidth) / 2;
+            windowY = monitorInfo.rcWork.top + (workHeight - windowHeight) / 2;
+        }
+    }
     window_ = CreateWindowExW(
         0, kWindowClassName, L"MdViewer", kMainWindowStyle,
-        CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left,
-        bounds.bottom - bounds.top, nullptr, nullptr, instance_, this);
+        windowX, windowY, windowWidth, windowHeight,
+        nullptr, nullptr, instance_, this);
     if (!window_) return false;
     ApplyNativeTheme();
     return true;
@@ -549,10 +571,35 @@ LRESULT DesktopApp::HandleWindowMessage(UINT message, WPARAM wParam,
     switch (message) {
     case WM_SIZE:
         ResizeBrowser();
+        ApplyNativeWindowFrame();
         SendWindowState();
         return 0;
+    case WM_NCCALCSIZE:
+        // The custom titlebar is rendered by the CEF view. Once maximized,
+        // remove the invisible resize frame so the client content reaches
+        // every edge of the monitor work area without transparent gutters.
+        if (wParam && (IsZoomed(window_) ||
+                       (GetWindowLongPtrW(window_, GWL_STYLE) & WS_MAXIMIZE))) {
+            return 0;
+        }
+        return DefWindowProcW(window_, message, wParam, lParam);
     case WM_GETMINMAXINFO: {
         auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        MONITORINFO monitorInfo{sizeof(monitorInfo)};
+        const HMONITOR monitor = MonitorFromWindow(
+            window_, MONITOR_DEFAULTTONEAREST);
+        if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+            // Use the monitor work area for maximize bounds so the window
+            // stops above the taskbar, just like a standard overlapped window.
+            limits->ptMaxPosition.x =
+                monitorInfo.rcWork.left - monitorInfo.rcMonitor.left;
+            limits->ptMaxPosition.y =
+                monitorInfo.rcWork.top - monitorInfo.rcMonitor.top;
+            limits->ptMaxSize.x =
+                monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+            limits->ptMaxSize.y =
+                monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+        }
         limits->ptMinTrackSize.x = 640;
         limits->ptMinTrackSize.y = 420;
         return 0;
@@ -1043,8 +1090,23 @@ void DesktopApp::ApplyNativeTheme() {
         DwmSetWindowAttribute(window_, legacyUseImmersiveDarkMode,
                               &dark, sizeof(dark));
     }
+    ApplyNativeWindowFrame();
     RedrawWindow(window_, nullptr, nullptr,
                  RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+}
+
+void DesktopApp::ApplyNativeWindowFrame() {
+    if (!window_) return;
+    // Windows 11 otherwise keeps the rounded DWM frame on this custom popup
+    // while maximized. Disable corner rounding only for the maximized state;
+    // the default preference preserves normal window behavior elsewhere.
+    constexpr DWORD kWindowCornerPreference = 33;  // DWMWA_WINDOW_CORNER_PREFERENCE
+    constexpr DWORD kDefaultCorner = 0;            // DWMWCP_DEFAULT
+    constexpr DWORD kDoNotRoundCorner = 1;         // DWMWCP_DONOTROUND
+    const DWORD preference = IsZoomed(window_)
+        ? kDoNotRoundCorner : kDefaultCorner;
+    DwmSetWindowAttribute(window_, kWindowCornerPreference,
+                          &preference, sizeof(preference));
 }
 
 bool DesktopApp::ConfirmSaveChanges(std::function<void()> afterSave) {

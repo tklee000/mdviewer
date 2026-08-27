@@ -213,7 +213,7 @@ try {
 
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zz6cAAAAASUVORK5CYII=";
   await evaluate(`(async () => {
-    document.querySelector('[data-status-mode="source"]').click();
+    document.querySelector('[data-mode-button="source"]').click();
     document.querySelector('[data-format="image"]').click();
     document.querySelector('#image-alt-input').value = 'pixel';
     document.querySelector('#image-source-input').value = 'data:image/png;base64,${png}';
@@ -222,12 +222,12 @@ try {
   await waitFor(() => evaluate(
     "document.querySelector('#source-editor').value === '![pixel](images/image.png)'"),
   "Native MDZ image link was not inserted");
-  await evaluate("document.querySelector('[data-status-mode=\"preview\"]').click()");
+  await evaluate("document.querySelector('[data-mode-button=\"preview\"]').click()");
   await waitFor(() => evaluate(`(() => {
     const image = document.querySelector('#preview-editor img[alt="pixel"]');
     return Boolean(image?.complete && image.naturalWidth === 1);
   })()`), "Preview did not load the image directly from the MDZ archive");
-  await evaluate("document.querySelector('[data-status-mode=\"source\"]').click()");
+  await evaluate("document.querySelector('[data-mode-button=\"source\"]').click()");
   await evaluate("document.querySelector('[data-menu-command=\"file.save\"]').click()");
   await waitFor(() => evaluate("document.querySelector('#dirty-indicator').hidden"),
     "Native MDZ image save did not finish");

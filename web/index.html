@@ -73,6 +73,7 @@
             <button type="button" role="menuitem" data-menu-command="edit.selectAll" data-i18n="Select &amp;All	Ctrl+A">Select &amp;All</button>
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="edit.find" data-i18n="&amp;Find...	Ctrl+F">&amp;Find...</button>
+            <button type="button" role="menuitem" data-menu-command="edit.replace" data-i18n="&amp;Replace...	Ctrl+H">&amp;Replace...</button>
             <button type="button" role="menuitem" data-menu-command="edit.autoNumberHeadings"
                     data-i18n="Auto-number headings">Auto-number headings</button>
           </div>
@@ -103,6 +104,9 @@
             <div class="menu-separator" role="separator"></div>
             <button type="button" role="menuitem" data-menu-command="view.fontSettings"
                     data-i18n="Font">Font</button>
+            <button id="source-line-numbers-menu" type="button" role="menuitemcheckbox"
+                    data-menu-command="view.toggleLineNumbers" aria-checked="true"
+                    data-i18n="Show line numbers">Show line numbers</button>
             <button id="preview-spelling-menu" type="button" role="menuitemcheckbox"
                     data-menu-command="view.togglePreviewSpelling" aria-checked="false"
                     data-i18n="Hide preview spelling underlines">Hide preview spelling underlines</button>
@@ -267,15 +271,95 @@
         <button type="button" data-table-command="columnDelete" data-i18n-title="Delete column" title="Delete column">−</button>
       </div>
 
+      <button id="find-button" class="find-button" type="button"
+              title="Find" aria-label="Find"
+              data-i18n-title="Find" data-i18n-aria-label="Find">
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="10.5" cy="10.5" r="6.5"></circle>
+          <path d="m16 16 5 5"></path>
+        </svg>
+      </button>
       <button id="theme-button" class="theme-button" type="button"
               title="Change theme" aria-label="Change theme"
               data-i18n-title="Change theme" data-i18n-aria-label="Change theme">◐</button>
+      <div class="mode-switch toolbar-mode-switch" role="group" aria-label="Editor mode"
+           data-i18n-aria-label="Editor mode" data-current-mode="preview">
+        <button id="source-mode-button" type="button" data-mode-button="source"
+                aria-pressed="false">
+          <span aria-hidden="true">&lt;/&gt;</span><span data-i18n="Source">Source</span>
+        </button>
+        <button id="split-mode-button" type="button" data-mode-button="split"
+                aria-pressed="false">
+          <span aria-hidden="true">◫</span><span data-i18n="Split">Split</span>
+        </button>
+        <button id="preview-mode-button" type="button" data-mode-button="preview"
+                aria-pressed="true">
+          <span aria-hidden="true">▣</span><span data-i18n="Preview">Preview</span>
+        </button>
+      </div>
     </header>
 
     <main class="editor-stage">
+      <div id="find-bar" class="find-bar" role="search" hidden>
+        <div class="find-row">
+          <button id="find-replace-toggle" class="find-replace-toggle" type="button"
+                  title="Show replace" aria-label="Show replace" aria-expanded="false"
+                  data-i18n-title="Show replace" data-i18n-aria-label="Show replace">
+            <svg class="find-control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m6 9 6 6 6-6"></path>
+            </svg>
+          </button>
+          <div class="find-input-wrap">
+            <svg class="find-input-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="10.5" cy="10.5" r="6.5"></circle>
+              <path d="m16 16 5 5"></path>
+            </svg>
+            <input id="find-input" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="Find" data-i18n-placeholder="Text to find"
+                   aria-label="Text to find" data-i18n-aria-label="Text to find">
+            <span id="find-count" aria-live="polite">0/0</span>
+          </div>
+          <button id="find-match-case" class="find-case-button" type="button"
+                  title="Match case" aria-label="Match case" aria-pressed="false"
+                  data-i18n-title="Match case" data-i18n-aria-label="Match case">Aa</button>
+          <button id="find-previous" class="find-nav-button" type="button"
+                  title="Previous match" aria-label="Previous match"
+                  data-i18n-title="Previous match" data-i18n-aria-label="Previous match">
+            <svg class="find-control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m6 15 6-6 6 6"></path>
+            </svg>
+          </button>
+          <button id="find-next" class="find-nav-button" type="button"
+                  title="Next match" aria-label="Next match"
+                  data-i18n-title="Next match" data-i18n-aria-label="Next match">
+            <svg class="find-control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m6 9 6 6 6-6"></path>
+            </svg>
+          </button>
+          <button id="find-close" class="find-close-button" type="button"
+                  title="Close find bar" aria-label="Close find bar"
+                  data-i18n-title="Close find bar" data-i18n-aria-label="Close find bar">
+            <svg class="find-control-icon find-close-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m6 6 12 12"></path>
+              <path d="m18 6-12 12"></path>
+            </svg>
+          </button>
+        </div>
+        <div id="find-replace-row" class="find-row find-replace-row" hidden>
+          <span class="find-row-spacer" aria-hidden="true"></span>
+          <input id="find-replace-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="Replace" data-i18n-placeholder="Replace"
+                 aria-label="Replace" data-i18n-aria-label="Replace">
+          <button id="find-replace-current" class="find-replace-button" type="button"
+                  data-i18n="Replace">Replace</button>
+          <button id="find-replace-all" class="find-replace-button" type="button"
+                  data-i18n="Replace all">Replace all</button>
+        </div>
+      </div>
       <section id="source-pane" class="editor-pane" aria-label="Markdown source"
                data-i18n-aria-label="Markdown source" hidden>
         <div class="source-editor-stack">
+          <div id="source-line-numbers" aria-hidden="true"><code id="source-line-numbers-code"></code></div>
           <pre id="source-highlight" aria-hidden="true"><code id="source-highlight-code"></code></pre>
           <textarea id="source-editor" spellcheck="false"
                     placeholder="Write Markdown source here…"
@@ -293,21 +377,6 @@
     </main>
 
     <footer class="statusbar">
-      <button id="mode-toggle-button" class="status-mode-toggle" type="button"
-              title="Editor mode" aria-label="Editor mode" aria-haspopup="menu" aria-expanded="false">
-        <span id="mode-toggle-icon" aria-hidden="true">▣</span>
-        <span id="mode-status">Preview</span>
-        <span class="status-mode-toggle-arrow" aria-hidden="true">▴</span>
-      </button>
-      <div id="status-mode-menu" class="menu-popup status-mode-menu" role="menu" hidden>
-        <button type="button" role="menuitemradio" data-status-mode="source" data-mode-menu="source"
-                aria-checked="false" data-i18n="Source">Source</button>
-        <button type="button" role="menuitemradio" data-status-mode="split" data-mode-menu="split"
-                aria-checked="false" data-i18n="Split">Split</button>
-        <button type="button" role="menuitemradio" data-status-mode="preview" data-mode-menu="preview"
-                aria-checked="true" data-i18n="Preview">Preview</button>
-      </div>
-      <span class="status-separator" aria-hidden="true"></span>
       <span id="position-status">Line 1, Column 1</span>
       <span class="status-spacer"></span>
       <span id="encoding-status">UTF-8</span>
@@ -380,6 +449,26 @@
       <footer class="settings-dialog-actions">
         <button type="button" data-dialog-cancel data-i18n="Cancel">Cancel</button>
         <button class="primary" type="submit" data-i18n="Apply">Apply</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="link-dialog" class="settings-dialog insert-dialog" aria-labelledby="link-dialog-title">
+    <form id="link-dialog-form" method="dialog">
+      <header class="settings-dialog-header">
+        <h2 id="link-dialog-title" data-i18n="Link">Link</h2>
+        <button class="dialog-close-button" type="button" data-link-dialog-cancel
+                aria-label="Close" data-i18n-aria-label="Close">×</button>
+      </header>
+      <div class="insert-dialog-body">
+        <label class="dialog-field">
+          <span data-i18n="Link address">Link address</span>
+          <input id="link-address-input" type="text" inputmode="url" autocomplete="off" required
+                 placeholder="https://">
+        </label>
+      </div>
+      <footer class="settings-dialog-actions">
+        <button type="button" data-link-dialog-cancel data-i18n="Cancel">Cancel</button>
+        <button class="primary" type="submit" data-i18n="Insert">Insert</button>
       </footer>
     </form>
   </dialog>

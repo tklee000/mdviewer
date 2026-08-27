@@ -1,5 +1,5 @@
 #define MyAppName "MdViewer"
-#define MyAppVersion "0.2.1"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "MdViewer"
 #define MyAppExeName "MdViewer.exe"
 

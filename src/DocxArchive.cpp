@@ -473,7 +473,7 @@ bool BuildBytes(const Document& document, std::string* bytes,
         entries.push_back({"docProps/app.xml", ToBytes(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
-            "<Application>MdViewer</Application><AppVersion>0.2.1</AppVersion><Company></Company><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged></Properties>")});
+            "<Application>MdViewer</Application><AppVersion>0.3.0</AppVersion><Company></Company><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged></Properties>")});
         entries.push_back({"word/document.xml", ToBytes(document.documentXml)});
         entries.push_back({"word/styles.xml", ToBytes(BuildStyles(document.sansSerif))});
         entries.push_back({"word/numbering.xml", ToBytes(BuildNumbering(document))});
